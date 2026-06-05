@@ -26,6 +26,12 @@ public class WfbLinkManager extends BroadcastReceiver {
     private final Context context;
     private int wifiChannel;
     private Bandwidth bandWidth;
+    // WFB owns the dongle only in WFB mode. In APFPV (dongle/Wi-Fi) modes this is
+    // false so auto-start (onResume / USB attach-detach) doesn't grab the dongle
+    // or print "Starting wfb-ng" over the APFPV flow. Explicit starts via the
+    // LinkModeCoordinator still call startAdapter() directly and are not gated.
+    private volatile boolean autoStart = true;
+    public void setAutoStart(boolean enabled) { this.autoStart = enabled; }
 
     public enum Bandwidth {
         BANDWIDTH_20(20),
@@ -119,6 +125,7 @@ public class WfbLinkManager extends BroadcastReceiver {
     }
 
     public synchronized void refreshAdapters() {
+        if (!autoStart) return;   // not in WFB mode — leave the dongle to APFPV
         Map<String, UsbDevice> attachedAdapters = getAttachedAdapters();
 
         boolean missingPermissions = false;
@@ -189,6 +196,7 @@ public class WfbLinkManager extends BroadcastReceiver {
     }
 
     public synchronized void startAdapters() {
+        if (!autoStart) return;   // not in WFB mode — leave the dongle to APFPV
         if (wfbLink.isRunning()) {
             return;
         }
@@ -200,6 +208,9 @@ public class WfbLinkManager extends BroadcastReceiver {
     }
 
     public synchronized boolean startAdapter(UsbDevice dev) {
+        Telemetry.event("wfb_start",
+                "vidpid", String.format("%04X:%04X", dev.getVendorId(), dev.getProductId()),
+                "ch", String.valueOf(wifiChannel));
         binding.tvMessage.setVisibility(View.VISIBLE);
         String text = "Starting wfb-ng channel " + wifiChannel + " with " + String.format(
                 "[%04X", dev.getVendorId()) + ":" + String.format("%04X]", dev.getProductId());

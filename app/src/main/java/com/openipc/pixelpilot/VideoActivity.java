@@ -352,6 +352,9 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
             (m, ok, detail) -> runOnUiThread(() -> {
                 this.linkMode = m;
                 this.apfpvMode = (m != LinkModeCoordinator.Mode.WFB);
+                // WFB owns the dongle only in WFB mode; gate its auto-start so a
+                // later onResume / USB event doesn't fight APFPV for the dongle.
+                wfbLinkManager.setAutoStart(m == LinkModeCoordinator.Mode.WFB);
                 Toast.makeText(this, detail, Toast.LENGTH_SHORT).show();
             }));
     }
@@ -594,6 +597,10 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
     private void showSettingsMenu(View anchor) {
         PopupMenu popup = new PopupMenu(this, anchor);
 
+        // Link mode FIRST — it decides the transport (WFB / APFPV dongle /
+        // APFPV phone Wi-Fi) and therefore which of the items below apply.
+        setupLinkModeSubMenu(popup);   // WFB-ng <-> APFPV transport toggle
+
         // VR submenu
         setupVRSubMenu(popup);
 
@@ -606,15 +613,16 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         // OSD submenu
         setupOSDSubMenu(popup);
 
-        // WFB submenu
-        setupWFBSubMenu(popup);
+        // WFB-NG gs.key — only meaningful in WFB mode; APFPV uses WPA2 creds.
+        if (!apfpvMode) {
+            setupWFBSubMenu(popup);
+        }
 
         // Adaptive link submenu
         setupAdaptiveLinkSubMenu(popup);
 
-        // --- APFPV integration: mode toggle + the GS-menu knobs that were
-        //     missing for BOTH modes (air wfbng knobs for wfb; full apfpv set) ---
-        setupLinkModeSubMenu(popup);   // WFB-ng <-> APFPV transport toggle
+        // --- APFPV integration: the GS-menu knobs (air wfbng knobs for wfb;
+        //     full apfpv set for apfpv modes) ---
         setupAirWfbngSubMenu(popup);   // air mcs/fec_k/fec_n/air_channel/width/mlink
         setupApfpvSubMenu(popup);      // apfpv ssid/pw + aalink + camera (when apfpv)
 
@@ -1654,10 +1662,38 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         wfbLinkManager.setChannel(getChannel(this));
         wfbLinkManager.setBandwidth(getBandwidth(this));
 
-        // On resume is called when the app is reopened, a device might have been plugged since the last time it started.
-        wfbLinkManager.refreshAdapters();
-
-        wfbLinkManager.startAdapters();
+        // Bring up the transport for the ACTIVE mode only — WFB must not grab the
+        // dongle (or print "Starting wfb-ng") when we're in an APFPV mode.
+        wfbLinkManager.setAutoStart(linkMode == LinkModeCoordinator.Mode.WFB);
+        switch (linkMode) {
+            case APFPV: {
+                // APFPV station on the dongle: enumerate Realtek adapters and bring
+                // the active one up with the saved credentials/channel.
+                String ssid = getSharedPreferences("pixelpilot", MODE_PRIVATE).getString("apfpv_ssid", "OpenIPC");
+                String pass = getSharedPreferences("pixelpilot", MODE_PRIVATE).getString("apfpv_pass", "12345678");
+                apfpvLinkManager.setChannel(getChannel(this));
+                apfpvLinkManager.setBandwidth(getBandwidth(this));
+                apfpvLinkManager.setCredentials(ssid, pass);
+                apfpvLinkManager.refreshAdapters();
+                break;
+            }
+            case APFPV_WIFI: {
+                // No dongle — associate the phone's Wi-Fi to the air unit.
+                String ssid = getSharedPreferences("pixelpilot", MODE_PRIVATE).getString("apfpv_ssid", "OpenIPC");
+                String pass = getSharedPreferences("pixelpilot", MODE_PRIVATE).getString("apfpv_pass", "12345678");
+                if (apfpvWifiManager != null) {
+                    apfpvWifiManager.setCredentials(ssid, pass);
+                    apfpvWifiManager.start();
+                }
+                break;
+            }
+            case WFB:
+            default:
+                // On resume a device might have been plugged since last start.
+                wfbLinkManager.refreshAdapters();
+                wfbLinkManager.startAdapters();
+                break;
+        }
         videoPlayer.start();
         videoPlayer.startAudio();
 

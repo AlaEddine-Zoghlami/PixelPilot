@@ -20,6 +20,7 @@ public class PixelPilotApp extends Application {
             FirebaseCrashlytics fc = FirebaseCrashlytics.getInstance();
             fc.setCrashlyticsCollectionEnabled(true);
             fc.setCustomKey("app", "PixelPilot-APFPV");
+            Telemetry.init(this);
         } catch (Throwable ignored) {
             // No Firebase config (placeholder google-services.json) — run without reporting.
         }

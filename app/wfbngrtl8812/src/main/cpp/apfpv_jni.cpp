@@ -55,8 +55,19 @@ JNIEXPORT jlong JNICALL
 Java_com_openipc_wfbngrtl8812_ApfpvStaLink_nativeStaInitialize(JNIEnv* env, jclass, jobject /*context*/) {
     auto* ctx = new StaCtx();
     env->GetJavaVM(&ctx->jvm);
-    libusb_init(&ctx->usb);
-    LOGI("ApfpvStation ctx initialized");
+
+    // Unrooted Android: we adopt a USB fd from the Java UsbManager, so libusb must
+    // NOT try to enumerate /dev/bus/usb. This option MUST be set BEFORE libusb_init
+    // (exactly as the WFB path does) — otherwise init fails on the device scan and
+    // leaves ctx->usb null, and the later libusb_wrap_sys_device dereferences that
+    // null context (the SIGSEGV at libusb1.0.so seen when switching to APFPV).
+    libusb_set_option(NULL, LIBUSB_OPTION_NO_DEVICE_DISCOVERY);
+    int r = libusb_init(&ctx->usb);
+    if (r < 0 || !ctx->usb) {
+        LOGE("libusb_init failed (%d) — APFPV station unavailable", r);
+        ctx->usb = nullptr;
+    }
+    LOGI("ApfpvStation ctx initialized (usb=%p)", (void*)ctx->usb);
     return reinterpret_cast<jlong>(ctx);
 }
 
@@ -68,10 +79,17 @@ Java_com_openipc_wfbngrtl8812_ApfpvStaLink_nativeStaConnect(
     if (!ctx) return;
     ctx->jlink = env->NewGlobalRef(jlink);
 
-    // Unrooted USB-host path (same as the wfb monitor path): adopt the fd.
-    libusb_set_option(ctx->usb, LIBUSB_OPTION_NO_DEVICE_DISCOVERY, nullptr);
-    if (libusb_wrap_sys_device(ctx->usb, (intptr_t)fd, &ctx->handle) < 0) {
-        LOGE("libusb_wrap_sys_device failed"); postState(ctx, ApfpvStation::State::FailNoAp); return;
+    // libusb must have initialized in nativeStaInitialize (option set before init).
+    // If it didn't, bail with a FAIL state instead of dereferencing a null context.
+    if (!ctx->usb) {
+        LOGE("libusb context null — cannot connect"); postState(ctx, ApfpvStation::State::FailNoAp); return;
+    }
+    // Unrooted USB-host path (same as the wfb monitor path): adopt the fd. The
+    // NO_DEVICE_DISCOVERY option was already set before libusb_init; do not repeat
+    // it here against the live context.
+    if (libusb_wrap_sys_device(ctx->usb, (intptr_t)fd, &ctx->handle) < 0 || !ctx->handle) {
+        LOGE("libusb_wrap_sys_device failed (fd=%d)", fd);
+        postState(ctx, ApfpvStation::State::FailNoAp); return;
     }
 
     const char* ssid = env->GetStringUTFChars(jssid, nullptr);

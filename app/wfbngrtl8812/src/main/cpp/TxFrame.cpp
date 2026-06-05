@@ -422,7 +422,7 @@ UsbTransmitter::UsbTransmitter(int k,
                                uint8_t *radiotapHeader,
                                size_t radiotapHeaderLen,
                                uint8_t frameType,
-                               Rtl8812aDevice *device)
+                               RtlJaguarDevice *device)
         : Transmitter(k, n, keypair, epoch, channelId), channelId_(channelId), currentOutput_(0), ieee80211Sequence_(0),
           radiotapHeader_(radiotapHeader), radiotapHeaderLen_(radiotapHeaderLen), frameType_(frameType),
           rtlDevice_(device) {
@@ -795,7 +795,7 @@ void TxFrame::dataSource(
     }
 }
 
-void TxFrame::run(Rtl8812aDevice *rtlDevice, TxArgs *arg) {
+void TxFrame::run(RtlJaguarDevice *rtlDevice, TxArgs *arg) {
     // Decide if using VHT
     if (arg->bandwidth >= 80) {
         arg->vht_mode = true;

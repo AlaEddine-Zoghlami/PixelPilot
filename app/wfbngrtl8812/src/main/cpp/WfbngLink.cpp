@@ -218,7 +218,7 @@ int WfbngLink::run(JNIEnv *env, jobject context, jint wifiChannel, jint bw, jint
             __android_log_print(
                 ANDROID_LOG_ERROR, TAG, "radio link ID %d, radio PORT %d", args->link_id, args->radio_port);
 
-            Rtl8812aDevice *current_device = rtl_devices.at(fd).get();
+            RtlJaguarDevice *current_device = rtl_devices.at(fd).get();
             if (!usb_tx_thread) {
                 init_thread(usb_tx_thread, [&]() {
                     return std::make_unique<std::thread>([this, current_device, args] {

@@ -209,7 +209,13 @@ public class ApfpvWifiManager {
         return pct;
     }
 
-    private void emitState(String s) { if (listener != null) ui.post(() -> listener.onState(s)); }
+    private void emitState(String s) {
+        com.openipc.pixelpilot.Telemetry.event("apfpv_wifi_state", "state", s);
+        if (listener != null) ui.post(() -> listener.onState(s));
+    }
     private void emitRssi(int d)     { if (listener != null) ui.post(() -> listener.onRssi(d)); }
-    private void emitError(String s) { if (listener != null) ui.post(() -> listener.onError(s)); }
+    private void emitError(String s) {
+        com.openipc.pixelpilot.Telemetry.event("apfpv_wifi_error", "detail", s != null ? s : "");
+        if (listener != null) ui.post(() -> listener.onError(s));
+    }
 }

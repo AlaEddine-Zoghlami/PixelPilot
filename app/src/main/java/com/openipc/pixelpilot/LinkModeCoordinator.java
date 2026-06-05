@@ -72,12 +72,13 @@ public class LinkModeCoordinator {
      * @param pass     APFPV password (ignored for WFB)
      */
     public synchronized void switchTo(Mode target, String ssid, String pass, ModeChangeListener cb) {
-        Crash.log("LinkMode switchTo " + target + " from " + current);
-        Crash.key("link_mode", target.name());
+        Telemetry.event("link_switch", "from", current.name(), "to", target.name());
+        Telemetry.setMode(target.name());
         if (target == current) { if (cb != null) cb.onModeChanged(current, true, "already in mode"); return; }
 
         // 1. STOP the active stack. Dongle modes release the libusb fd; the
         //    phone-Wi-Fi mode tears down its network binding + association.
+        Telemetry.event("link_stop_prev", "mode", current.name());
         switch (current) {
             case WFB:        wfb.stopAdapters();   break;
             case APFPV:      apfpv.stopAdapters(); break;
@@ -120,6 +121,7 @@ public class LinkModeCoordinator {
                 detail = ok ? "switched to WFB-ng (dongle)" : "no RTL8812AU dongle found";
                 break;
         }
+        Telemetry.event("link_start_result", "mode", target.name(), "ok", String.valueOf(ok));
         if (cb != null) cb.onModeChanged(current, ok, detail);
     }
 

@@ -53,6 +53,9 @@ public class ApfpvLinkManager {
         // Drive the connection-state UI — the surface WFB-ng never needed.
         this.staLink.setStatusListener(new ApfpvStaLink.StaStatusListener() {
             @Override public void onStateChanged(StaState s) {
+                // Full station-mode funnel: SCANNING -> ARMING -> ... -> STREAMING,
+                // or a FAIL_* terminal state. One event per transition.
+                Telemetry.event("apfpv_state", "state", s.name());
                 // On a successful link, persist the active adapter so it
                 // auto-reconnects next time (VRX keeps the "auto" wlx).
                 if (s == StaState.STREAMING && wlx != null && connectingAdapterName != null) {
@@ -61,7 +64,10 @@ public class ApfpvLinkManager {
                 showState(s);
             }
             @Override public void onRssi(int dbm)            { showRssi(dbm); }
-            @Override public void onError(String detail)     { showError(detail); }
+            @Override public void onError(String detail)     {
+                Telemetry.event("apfpv_error", "detail", detail != null ? detail : "");
+                showError(detail);
+            }
         });
     }
 
@@ -103,13 +109,19 @@ public class ApfpvLinkManager {
     // crash the app when switching to APFPV dongle mode with a device connected —
     // notably openDevice() returning null and being dereferenced for its fd.
     public synchronized boolean startAdapter(UsbDevice dev) {
-        if (dev == null) return false;
+        if (dev == null) { Telemetry.event("apfpv_start_fail", "reason", "no_device"); return false; }
+        String vidpid = String.format("%04X:%04X", dev.getVendorId(), dev.getProductId());
+        Telemetry.event("apfpv_start", "vidpid", vidpid, "ch", String.valueOf(wifiChannel));
         UsbManager mgr = (UsbManager) context.getSystemService(Context.USB_SERVICE);
-        if (mgr == null) { showMessage("APFPV: USB service unavailable"); return false; }
+        if (mgr == null) {
+            Telemetry.event("apfpv_start_fail", "reason", "no_usb_service");
+            showMessage("APFPV: USB service unavailable"); return false;
+        }
 
         // No permission yet: request it (mirrors the WFB path) and bail — the
         // grant lets a subsequent switch/refresh succeed. Never open without it.
         if (!mgr.hasPermission(dev)) {
+            Telemetry.event("apfpv_perm_request", "vidpid", vidpid);
             requestPermission(mgr, dev);
             showMessage("APFPV: allow USB access, then switch again");
             return false;
@@ -119,12 +131,14 @@ public class ApfpvLinkManager {
         // the stack we just tore down — must not deref it for getFileDescriptor().
         UsbDeviceConnection conn = mgr.openDevice(dev);
         if (conn == null) {
+            Telemetry.event("apfpv_start_fail", "reason", "open_null");
             showMessage("APFPV: couldn't open dongle (busy?) — re-plug and retry");
             return false;
         }
         int fd = conn.getFileDescriptor();
         if (fd < 0) {
             conn.close();
+            Telemetry.event("apfpv_start_fail", "reason", "bad_fd");
             showMessage("APFPV: invalid dongle handle");
             return false;
         }
@@ -133,18 +147,18 @@ public class ApfpvLinkManager {
         // native side dereferences a null handle (SIGSEGV, not a Java exception).
         if (staLink == null || staLink.handle() == 0L) {
             conn.close();
+            Telemetry.event("apfpv_start_fail", "reason", "native_uninit");
             showMessage("APFPV: station driver not initialised");
             return false;
         }
 
         showMessage("APFPV: connecting to \"" + ssid + "\" ch" + wifiChannel);
 
-        // Breadcrumbs so a crash in the native chain below is pinpointed in the
-        // Crashlytics report (the JNI call can SIGSEGV — no Java stack otherwise).
-        Crash.key("link_mode", "APFPV");
+        // Flow event + Crashlytics keys so a crash in the native chain below is
+        // pinpointed (the JNI call can SIGSEGV — no Java stack otherwise).
         Crash.key("apfpv_channel", String.valueOf(wifiChannel));
-        Crash.log(String.format("APFPV startAdapter: dongle %04X:%04X fd=%d -> nativeStaConnect",
-                                 dev.getVendorId(), dev.getProductId(), fd));
+        Telemetry.setMode("APFPV");
+        Telemetry.event("apfpv_native_connect", "vidpid", vidpid, "fd", String.valueOf(fd));
 
         // Runs the WHOLE gated native chain: ARM -> auth -> assoc -> WPA2 ->
         // DHCP -> RTP. State callbacks drive the UI; STREAMING => video on 5600.
