@@ -1189,10 +1189,16 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
             .setAdapter(adapter, (d, which) -> {
                 if (which < 0 || which >= order.size()) return;
                 String chosen = order.get(which);
+                int[] v = aps.get(chosen);
+                int chosenCh = (v != null) ? v[0] : 0;
+                // Persist SSID + its channel so connect tunes straight to it
+                // (and the discovery scan uses it as the hint, not a blind sweep).
                 getSharedPreferences("pixelpilot", MODE_PRIVATE).edit()
-                    .putString("apfpv_ssid", chosen).apply();
-                android.widget.Toast.makeText(this, "APFPV SSID: " + chosen,
+                    .putString("apfpv_ssid", chosen)
+                    .putInt("apfpv_channel", chosenCh > 0 ? chosenCh : 40).apply();
+                android.widget.Toast.makeText(this, "APFPV SSID: " + chosen + " (ch " + chosenCh + ")",
                         android.widget.Toast.LENGTH_SHORT).show();
+                if (chosenCh > 0) apfpvLinkManager.setChannel(chosenCh);
                 apfpvLinkManager.setCredentials(chosen,
                     getSharedPreferences("pixelpilot", MODE_PRIVATE).getString("apfpv_pass", "12345678"));
             })
@@ -1744,7 +1750,9 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
                 // the active one up with the saved credentials/channel.
                 String ssid = getSharedPreferences("pixelpilot", MODE_PRIVATE).getString("apfpv_ssid", "OpenIPC");
                 String pass = getSharedPreferences("pixelpilot", MODE_PRIVATE).getString("apfpv_pass", "12345678");
-                apfpvLinkManager.setChannel(getChannel(this));
+                // Use the APFPV channel (from the SSID picker), not the WFB channel.
+                int apfpvCh = getSharedPreferences("pixelpilot", MODE_PRIVATE).getInt("apfpv_channel", 40);
+                apfpvLinkManager.setChannel(apfpvCh);
                 apfpvLinkManager.setBandwidth(getBandwidth(this));
                 apfpvLinkManager.setCredentials(ssid, pass);
                 apfpvLinkManager.refreshAdapters();
