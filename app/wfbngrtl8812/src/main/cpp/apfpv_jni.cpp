@@ -38,15 +38,29 @@ struct StaCtx {
     sockaddr_in                   rtpDst{};
 };
 
-// Forward state/rssi to Java (onNativeState / onNativeRssi callbacks).
+// Forward state to Java (onNativeState). The state callback can fire either on
+// an internal worker thread (not attached to the JVM) OR synchronously on the
+// thread that called nativeStaConnect (already attached, owned by ART). We must
+// only Attach/Detach a thread WE attached — unconditionally detaching the
+// caller's thread is what aborted the app (SIGABRT via ART) after libusb init.
 static void postState(StaCtx* ctx, ApfpvStation::State s) {
-    if (!ctx->jvm || !ctx->jlink) return;
+    if (!ctx || !ctx->jvm || !ctx->jlink) return;
     JNIEnv* env = nullptr;
-    if (ctx->jvm->AttachCurrentThread(&env, nullptr) != JNI_OK) return;
+    bool weAttached = false;
+    jint r = ctx->jvm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6);
+    if (r == JNI_EDETACHED) {
+        if (ctx->jvm->AttachCurrentThread(&env, nullptr) != JNI_OK || !env) return;
+        weAttached = true;
+    } else if (r != JNI_OK || !env) {
+        return;
+    }
     jclass cls = env->GetObjectClass(ctx->jlink);
-    jmethodID m = env->GetMethodID(cls, "onNativeState", "(I)V");
-    if (m) env->CallVoidMethod(ctx->jlink, m, (jint)s);
-    ctx->jvm->DetachCurrentThread();
+    if (cls) {
+        jmethodID m = env->GetMethodID(cls, "onNativeState", "(I)V");
+        if (m) env->CallVoidMethod(ctx->jlink, m, (jint)s);
+        env->DeleteLocalRef(cls);
+    }
+    if (weAttached) ctx->jvm->DetachCurrentThread();  // never detach the caller's thread
 }
 
 extern "C" {
@@ -121,16 +135,34 @@ Java_com_openipc_wfbngrtl8812_ApfpvStaLink_nativeStaConnect(
     //       ctx->driver->adapter(), ctx->driver->radioManager(), onRtp, onState);
     // Real devourer factory path: WiFiDriver.CreateRtlDevice(handle) builds the
     // RtlJaguarDevice (which owns the RtlUsbAdapter + RadioManagementModule).
-    ctx->driver = std::make_unique<WiFiDriver>(nullptr /*Logger_t*/);
-    ctx->rtl = ctx->driver->CreateRtlDevice(ctx->handle);
-    ctx->station = std::make_unique<ApfpvStation>(
-        &ctx->rtl->adapter(), &ctx->rtl->radioManager(), onRtp, onState);
-    ctx->station->setDevice(ctx->rtl.get());   // RX path: device -> RxDeframe
+    // The whole bring-up is wrapped: a C++ exception (bad device, alloc, driver
+    // assertion) must NOT propagate across the JNI boundary — that calls
+    // std::terminate -> abort (SIGABRT). On any failure we post a FAIL state.
+    try {
+        ctx->driver = std::make_unique<WiFiDriver>(nullptr /*Logger_t*/);
+        ctx->rtl = ctx->driver->CreateRtlDevice(ctx->handle);
+        if (!ctx->rtl) {
+            LOGE("CreateRtlDevice returned null");
+            postState(ctx, ApfpvStation::State::FailNoAp);
+            env->ReleaseStringUTFChars(jssid, ssid);
+            env->ReleaseStringUTFChars(jpass, pass);
+            return;
+        }
+        ctx->station = std::make_unique<ApfpvStation>(
+            &ctx->rtl->adapter(), &ctx->rtl->radioManager(), onRtp, onState);
+        ctx->station->setDevice(ctx->rtl.get());   // RX path: device -> RxDeframe
 
-    ApfpvStation::Params p;
-    p.channel = channel; p.bandwidth = bandwidth;
-    p.ssid = ssid; p.passphrase = pass; p.lqFeedback = true;
-    ctx->station->connect(p);     // runs the gated chain; states -> Java
+        ApfpvStation::Params p;
+        p.channel = channel; p.bandwidth = bandwidth;
+        p.ssid = ssid; p.passphrase = pass; p.lqFeedback = true;
+        ctx->station->connect(p);     // runs the gated chain; states -> Java
+    } catch (const std::exception& e) {
+        LOGE("APFPV bring-up threw: %s", e.what());
+        postState(ctx, ApfpvStation::State::FailNoAp);
+    } catch (...) {
+        LOGE("APFPV bring-up threw an unknown exception");
+        postState(ctx, ApfpvStation::State::FailNoAp);
+    }
 
     env->ReleaseStringUTFChars(jssid, ssid);
     env->ReleaseStringUTFChars(jpass, pass);
