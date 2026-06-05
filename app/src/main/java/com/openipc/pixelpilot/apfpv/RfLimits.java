@@ -8,8 +8,8 @@ package com.openipc.pixelpilot.apfpv;
  * so to stay at a legal EIRP cap with a higher-gain antenna we must LOWER the
  * conducted power by the gain. The configured gain is that of the antenna the GS
  * DONGLE TRANSMITS on (worst case). The EMAX Wyvern Link VRX kit ships an LHCP
- * omni (~2 dBi) + a patch (~6-8 dBi); use the patch -> default 6 dB. We derive the
- * conducted target per mode:
+ * omni (~2 dBi, circular) + a flat hexagon patch (~6-8 dBi); use the patch and
+ * round up -> default 8 dB. We derive the conducted target per mode:
  *
  *   APFPV  5.2 GHz UNII-1 : 200 mW EIRP = 23.0 dBm   -> conducted = 23.0 - gain
  *   WFB    5.8 GHz        :  25 mW EIRP = 14.0 dBm   -> conducted = 14.0 - gain
@@ -28,7 +28,7 @@ public final class RfLimits {
     public static final double EIRP_APFPV_DBM = 23.0;   // 200 mW, 5.2 GHz UNII-1
     public static final double EIRP_WFB_DBM   = 14.0;   //  25 mW, 5.8 GHz
 
-    public static final double DEFAULT_ANTENNA_GAIN_DB = 6.0;
+    public static final double DEFAULT_ANTENNA_GAIN_DB = 8.0;   // EMAX VRX hexagon patch (conservative)
 
     // Measured RTL8812AU index<->conducted-power, from OpenHD's HackRF table for
     // the ASUS AC56-USB (a bare 8812au, used as a proxy for the EMAX VRX — STILL
