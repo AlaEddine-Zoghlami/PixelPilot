@@ -84,6 +84,19 @@ static bool ensureStation(StaCtx* ctx) {
     };
     auto onState = [c](ApfpvStation::State s){ postState(c, s); };
     try {
+        // CLAIM THE USB INTERFACE before bringing the chip up — the same step the
+        // working WFB path (WfbngLink.cpp) and the devourer demo do. Without it,
+        // control transfers (channel tuning) still work but the BULK RX endpoint
+        // delivers NOTHING — which is exactly why the scan saw 0 beacons. Detach
+        // any kernel driver first, then claim interface 0. (No libusb_reset_device
+        // on Android — we hold an adopted fd, not an owned device.)
+        if (libusb_kernel_driver_active(ctx->handle, 0) == 1) {
+            int d = libusb_detach_kernel_driver(ctx->handle, 0);
+            LOGI("detach_kernel_driver: %d", d);
+        }
+        int cr = libusb_claim_interface(ctx->handle, 0);
+        LOGI("claim_interface(0): %d", cr);
+
         ctx->driver = std::make_unique<WiFiDriver>(nullptr /*Logger_t*/);
         ctx->rtl = ctx->driver->CreateRtlDevice(ctx->handle);
         if (!ctx->rtl) { LOGE("CreateRtlDevice returned null"); return false; }
