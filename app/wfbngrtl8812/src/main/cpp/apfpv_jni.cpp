@@ -219,6 +219,10 @@ Java_com_openipc_wfbngrtl8812_ApfpvStaLink_nativeStaScan(
         }
         if (att) ctx->jvm->DetachCurrentThread();
     };
+    // Stop any running connect/reconnect supervisor first — otherwise the
+    // supervisor thread and the scan both drive the same USB device and the
+    // register reads collide (rtw_read throws). disconnect() is a no-op if idle.
+    ctx->station->disconnect();
     try { ctx->station->scanAll(perChannelMs > 0 ? perChannelMs : 250, onAp); }
     catch (...) { LOGE("scanAll threw"); }
 }

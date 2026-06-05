@@ -1163,47 +1163,62 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
             .putString("aalink_mcs", c.mcsSource).putInt("aalink_tput", c.throughputPct).apply();
     }
 
-    /** Live SSID picker: kicks off a dongle RF scan and fills a list as APs are
-     *  found. Tapping one stores it as the APFPV SSID (password entered separately). */
+    /** Live SSID picker: repeatedly scans the dongle (~every 3s while open),
+     *  keeps the strongest signal per SSID, and shows them sorted by dBm
+     *  (strongest first). Tapping one stores it as the APFPV SSID. */
     private void showApfpvScanDialog() {
         if (apfpvLinkManager == null) return;
+        final java.util.Map<String, int[]> aps = new java.util.concurrent.ConcurrentHashMap<>(); // ssid -> [channel, dbm]
+        final java.util.List<String> order  = new java.util.ArrayList<>();   // ssids in display order
         final java.util.List<String> labels = new java.util.ArrayList<>();
-        final java.util.List<String> ssids  = new java.util.ArrayList<>();
-        final java.util.Set<String> seen    = new java.util.HashSet<>();
         final android.widget.ArrayAdapter<String> adapter =
             new android.widget.ArrayAdapter<>(this, android.R.layout.simple_list_item_1, labels);
+        final boolean[] open = { true };
+        final android.os.Handler h = new android.os.Handler(getMainLooper());
 
         final android.app.AlertDialog dlg = new android.app.AlertDialog.Builder(this)
-            .setTitle("Scanning for SSIDs…")
+            .setTitle("Scanning… (strongest first)")
             .setAdapter(adapter, (d, which) -> {
-                String chosen = ssids.get(which);
+                if (which < 0 || which >= order.size()) return;
+                String chosen = order.get(which);
                 getSharedPreferences("pixelpilot", MODE_PRIVATE).edit()
                     .putString("apfpv_ssid", chosen).apply();
                 android.widget.Toast.makeText(this, "APFPV SSID: " + chosen,
                         android.widget.Toast.LENGTH_SHORT).show();
-                if (apfpvLinkManager != null) apfpvLinkManager.setCredentials(chosen,
+                apfpvLinkManager.setCredentials(chosen,
                     getSharedPreferences("pixelpilot", MODE_PRIVATE).getString("apfpv_pass", "12345678"));
             })
             .setNegativeButton("Close", null)
             .create();
+        dlg.setOnDismissListener(d -> open[0] = false);   // stop the 3s re-poll
         dlg.show();
 
-        // ~250ms/channel sweep; results stream in on the scan worker thread.
-        boolean started = apfpvLinkManager.scanSsids(250, new ApfpvStaLink.ScanListener() {
+        final Runnable rebuild = () -> {
+            java.util.List<String> sorted = new java.util.ArrayList<>(aps.keySet());
+            sorted.sort((a, b) -> Integer.compare(aps.get(b)[1], aps.get(a)[1])); // dBm desc
+            order.clear(); labels.clear();
+            for (String s : sorted) { int[] v = aps.get(s);
+                order.add(s); labels.add(s + "   (" + v[1] + " dBm, ch " + v[0] + ")"); }
+            adapter.notifyDataSetChanged();
+        };
+
+        final ApfpvStaLink.ScanListener[] L = new ApfpvStaLink.ScanListener[1];
+        L[0] = new ApfpvStaLink.ScanListener() {
             @Override public void onSsid(String ssid, int channel, int dbm) {
-                runOnUiThread(() -> {
-                    if (!seen.add(ssid)) return;
-                    ssids.add(ssid);
-                    labels.add(ssid + "   (ch " + channel + ", " + dbm + " dBm)");
-                    adapter.notifyDataSetChanged();
-                });
+                int[] prev = aps.get(ssid);
+                if (prev == null || dbm > prev[1]) aps.put(ssid, new int[]{channel, dbm}); // keep strongest
+                runOnUiThread(rebuild);
             }
             @Override public void onScanDone() {
-                runOnUiThread(() -> dlg.setTitle(labels.isEmpty()
-                        ? "No SSIDs found — tap Close" : "Select an SSID"));
+                runOnUiThread(() -> dlg.setTitle(aps.isEmpty()
+                        ? "No SSIDs yet — scanning…" : "Select SSID (strongest first)"));
+                if (open[0]) h.postDelayed(() -> {   // re-poll while the dialog is open
+                    if (open[0]) apfpvLinkManager.scanSsids(200, L[0]);
+                }, 3000);
             }
-        });
-        if (!started) dlg.setTitle("Scan unavailable (no dongle/permission)");
+        };
+        if (!apfpvLinkManager.scanSsids(200, L[0]))
+            dlg.setTitle("Scan unavailable (no dongle/permission)");
     }
 
     /** Minimal SSID/password entry for APFPV association. */
