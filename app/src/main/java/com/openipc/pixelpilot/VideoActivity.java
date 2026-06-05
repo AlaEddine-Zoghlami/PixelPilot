@@ -1406,14 +1406,18 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         final android.widget.EditText dist = new android.widget.EditText(this);
         dist.setInputType(android.text.InputType.TYPE_CLASS_NUMBER | android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL);
         dist.setHint("Distance 0.1–5 m");
+        float lastDist = getSharedPreferences("pixelpilot", MODE_PRIVATE).getFloat("eirp_distance_m", 2.0f);
+        dist.setText(String.format(java.util.Locale.US, "%.1f", lastDist));   // default 2 m
+        dist.setSelectAllOnFocus(true);
         new android.app.AlertDialog.Builder(this)
             .setTitle("Distance to \"" + ssid + "\"")
-            .setMessage("RSSI " + rssiDbm + " dBm @ " + freqMHz + " MHz.\nLine-of-sight distance (0.1–5 m). ~1–2 m reads best — too close can saturate the RSSI.")
+            .setMessage("RSSI " + rssiDbm + " dBm @ " + freqMHz + " MHz.\nLine-of-sight distance (0.1–5 m, default 2 m). ~1–2 m reads best — too close can saturate the RSSI.")
             .setView(dist)
             .setPositiveButton("Estimate", (d, w2) -> {
                 double dm;
                 try { dm = Double.parseDouble(dist.getText().toString().trim()); } catch (Exception e) { dm = 0; }
                 if (dm <= 0) { Toast.makeText(this, "Enter a distance > 0 m", Toast.LENGTH_SHORT).show(); return; }
+                getSharedPreferences("pixelpilot", MODE_PRIVATE).edit().putFloat("eirp_distance_m", (float) dm).apply();
                 showEirpResult(ssid, rssiDbm, freqMHz, dm);
             })
             .setNegativeButton("Cancel", null)
