@@ -1024,6 +1024,25 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         // APFPV connection actions (simple items on the main menu, gs-style)
         SubMenu m = popup.getMenu().addSubMenu("APFPV");
         m.add("SSID / Password...").setOnMenuItemClickListener(i -> { showApfpvCredsDialog(); return true; });
+        // One-tap DE legal APFPV RF (dongle only — phone-Wi-Fi mode is regulated by
+        // the OS). 5.2 GHz UNII-1 ch40 (centered, in 5170-5250), 20 MHz (200 mW
+        // under the 10 mW/MHz PSD cap), TX index ~200 mW. EIRP still depends on
+        // antenna gain — that's the real limiter, so verify your setup.
+        m.add("Apply DE legal limits").setOnMenuItemClickListener(i -> {
+            getSharedPreferences("pixelpilot", MODE_PRIVATE).edit()
+                .putInt("apfpv_channel", 40).putInt("apfpv_bandwidth", 20).apply();
+            getSharedPreferences("general", MODE_PRIVATE).edit()
+                .putInt("adaptive_tx_power", 30).apply();
+            if (apfpvLinkManager != null) {
+                apfpvLinkManager.setChannel(40);
+                apfpvLinkManager.setBandwidth(20);
+            }
+            if (apfpvLink != null) apfpvLink.setTxPower(30);
+            android.widget.Toast.makeText(this,
+                "APFPV → DE legal: 5.2 GHz ch40, 20 MHz, TX≈200 mW (verify EIRP w/ your antenna). Reconnect to apply.",
+                android.widget.Toast.LENGTH_LONG).show();
+            return true;
+        });
         m.add("Reconnect").setOnMenuItemClickListener(i -> {
             if (apfpvLinkManager != null) apfpvLinkManager.refreshAdapters(); return true; });
         // Mode-aware status: dongle has the full funnel (adapter -> connecting ->
@@ -1742,10 +1761,12 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
                 // the active one up with the saved credentials/channel.
                 String ssid = getSharedPreferences("pixelpilot", MODE_PRIVATE).getString("apfpv_ssid", "OpenIPC");
                 String pass = getSharedPreferences("pixelpilot", MODE_PRIVATE).getString("apfpv_pass", "12345678");
-                // Use the APFPV channel (from the SSID picker), not the WFB channel.
+                // APFPV (dongle) RF is independent of WFB: use the APFPV channel +
+                // bandwidth prefs (default legal DE 5.2 GHz UNII-1 ch40, 20 MHz).
                 int apfpvCh = getSharedPreferences("pixelpilot", MODE_PRIVATE).getInt("apfpv_channel", 40);
+                int apfpvBw = getSharedPreferences("pixelpilot", MODE_PRIVATE).getInt("apfpv_bandwidth", 20);
                 apfpvLinkManager.setChannel(apfpvCh);
-                apfpvLinkManager.setBandwidth(getBandwidth(this));
+                apfpvLinkManager.setBandwidth(apfpvBw);
                 apfpvLinkManager.setCredentials(ssid, pass);
                 apfpvLinkManager.refreshAdapters();
                 break;
