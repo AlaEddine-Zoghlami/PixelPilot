@@ -1024,22 +1024,36 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         // APFPV connection actions (simple items on the main menu, gs-style)
         SubMenu m = popup.getMenu().addSubMenu("APFPV");
         m.add("SSID / Password...").setOnMenuItemClickListener(i -> { showApfpvCredsDialog(); return true; });
+        // Antenna gain entry (dBi, default 6) — feeds the EIRP-compliant TX power
+        // below. EIRP = conducted + gain, so a higher-gain antenna LOWERS the
+        // commanded conducted power to hold the legal cap.
+        float gainNow = getSharedPreferences("pixelpilot", MODE_PRIVATE)
+                .getFloat("antenna_gain_db", (float) com.openipc.pixelpilot.apfpv.RfLimits.DEFAULT_ANTENNA_GAIN_DB);
+        m.add(String.format(java.util.Locale.US, "Antenna gain: %.0f dBi…", gainNow))
+            .setOnMenuItemClickListener(i -> { showAntennaGainDialog(); return true; });
         // One-tap DE legal APFPV RF (dongle only — phone-Wi-Fi mode is regulated by
         // the OS). 5.2 GHz UNII-1 ch40 (centered, in 5170-5250), 20 MHz (200 mW
-        // under the 10 mW/MHz PSD cap), TX index ~200 mW. EIRP still depends on
-        // antenna gain — that's the real limiter, so verify your setup.
+        // EIRP under the PSD cap). TX index derived from 200 mW EIRP MINUS the
+        // configured antenna gain. EIRP still depends on the real antenna — verify.
         m.add("Apply DE legal limits").setOnMenuItemClickListener(i -> {
+            float gain = getSharedPreferences("pixelpilot", MODE_PRIVATE)
+                    .getFloat("antenna_gain_db", (float) com.openipc.pixelpilot.apfpv.RfLimits.DEFAULT_ANTENNA_GAIN_DB);
+            int idx = com.openipc.pixelpilot.apfpv.RfLimits.legalIndex(
+                    com.openipc.pixelpilot.apfpv.RfLimits.EIRP_APFPV_DBM, gain);
+            double cond = com.openipc.pixelpilot.apfpv.RfLimits.conductedDbm(
+                    com.openipc.pixelpilot.apfpv.RfLimits.EIRP_APFPV_DBM, gain);
             getSharedPreferences("pixelpilot", MODE_PRIVATE).edit()
                 .putInt("apfpv_channel", 40).putInt("apfpv_bandwidth", 20).apply();
             getSharedPreferences("general", MODE_PRIVATE).edit()
-                .putInt("adaptive_tx_power", 30).apply();
+                .putInt("adaptive_tx_power", idx).apply();
             if (apfpvLinkManager != null) {
                 apfpvLinkManager.setChannel(40);
                 apfpvLinkManager.setBandwidth(20);
             }
-            if (apfpvLink != null) apfpvLink.setTxPower(30);
-            android.widget.Toast.makeText(this,
-                "APFPV → DE legal: 5.2 GHz ch40, 20 MHz, TX≈200 mW (verify EIRP w/ your antenna). Reconnect to apply.",
+            if (apfpvLink != null) apfpvLink.setTxPower(idx);
+            android.widget.Toast.makeText(this, String.format(java.util.Locale.US,
+                "APFPV → DE legal: 5.2 GHz ch40, 20 MHz. 200 mW EIRP − %.0f dB ant = %.0f dBm conducted (TX idx %d, ~%d mW). Verify w/ a meter. Reconnect to apply.",
+                gain, cond, idx, com.openipc.pixelpilot.apfpv.RfLimits.mw(cond)),
                 android.widget.Toast.LENGTH_LONG).show();
             return true;
         });
@@ -1264,6 +1278,34 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
                     .putString("apfpv_pass", pass.getText().toString().isEmpty() ? "12345678" : pass.getText().toString())
                     .apply();
                 if (apfpvLinkManager != null) apfpvLinkManager.refreshAdapters();
+            })
+            .setNegativeButton("Cancel", null)
+            .show();
+    }
+
+    /** Configure the (VTX) antenna gain in dBi — feeds the EIRP-compliant TX power.
+     *  EIRP = conducted + gain, so a higher-gain antenna lowers the commanded
+     *  conducted power needed to hold the legal cap (200 mW APFPV / 25 mW WFB). */
+    private void showAntennaGainDialog() {
+        final android.widget.EditText in = new android.widget.EditText(this);
+        in.setInputType(android.text.InputType.TYPE_CLASS_NUMBER | android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL);
+        float cur = getSharedPreferences("pixelpilot", MODE_PRIVATE)
+                .getFloat("antenna_gain_db", (float) com.openipc.pixelpilot.apfpv.RfLimits.DEFAULT_ANTENNA_GAIN_DB);
+        in.setText(String.format(java.util.Locale.US, "%.0f", cur));
+        in.setHint("Antenna gain (dBi)");
+        new android.app.AlertDialog.Builder(this)
+            .setTitle("Antenna gain (dBi)")
+            .setMessage("Your VTX antenna gain. EIRP = conducted + gain; 'Apply DE legal limits' lowers the dongle TX power by this to hold the legal cap.")
+            .setView(in)
+            .setPositiveButton("Save", (d, w2) -> {
+                float g;
+                try { g = Float.parseFloat(in.getText().toString().trim()); }
+                catch (Exception e) { g = (float) com.openipc.pixelpilot.apfpv.RfLimits.DEFAULT_ANTENNA_GAIN_DB; }
+                g = Math.max(0f, Math.min(20f, g));   // sane dBi range
+                getSharedPreferences("pixelpilot", MODE_PRIVATE).edit().putFloat("antenna_gain_db", g).apply();
+                android.widget.Toast.makeText(this, String.format(java.util.Locale.US,
+                    "Antenna gain %.0f dBi saved. Tap 'Apply DE legal limits' to recompute TX power.", g),
+                    android.widget.Toast.LENGTH_SHORT).show();
             })
             .setNegativeButton("Cancel", null)
             .show();
