@@ -816,6 +816,33 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
                 return true;
             });
         }
+        // Mode-aware "DE legal" TX power: derive the index from the band's EIRP cap
+        // (APFPV 200 mW / WFB 25 mW) MINUS the configured antenna gain. Covers both
+        // modes from one place; phone-Wi-Fi has no app-settable dongle power.
+        MenuItem legalPwr = powerSubMenu.add("DE legal (EIRP − antenna)");
+        legalPwr.setOnMenuItemClickListener(item -> {
+            float gain = getSharedPreferences("pixelpilot", MODE_PRIVATE)
+                    .getFloat("antenna_gain_db", (float) com.openipc.pixelpilot.apfpv.RfLimits.DEFAULT_ANTENNA_GAIN_DB);
+            boolean apfpv = (linkMode == LinkModeCoordinator.Mode.APFPV);
+            boolean wifi  = (linkMode == LinkModeCoordinator.Mode.APFPV_WIFI);
+            double cap = apfpv ? com.openipc.pixelpilot.apfpv.RfLimits.EIRP_APFPV_DBM
+                               : com.openipc.pixelpilot.apfpv.RfLimits.EIRP_WFB_DBM;
+            int idx = com.openipc.pixelpilot.apfpv.RfLimits.legalIndex(cap, gain);
+            double cond = com.openipc.pixelpilot.apfpv.RfLimits.conductedDbm(cap, gain);
+            getSharedPreferences("general", MODE_PRIVATE).edit().putInt("adaptive_tx_power", idx).apply();
+            if (wifi) {
+                Toast.makeText(this, "Phone-Wi-Fi: TX power is OS-controlled (no dongle)", Toast.LENGTH_SHORT).show();
+            } else {
+                if (linkMode == LinkModeCoordinator.Mode.WFB) wfbLink.nativeSetTxPower(idx);
+                else if (apfpvLink != null) apfpvLink.setTxPower(idx);
+                Toast.makeText(this, String.format(java.util.Locale.US,
+                    "%s legal: %d mW EIRP − %.0f dB ant = %.0f dBm (~%d mW), TX idx %d. Verify w/ a meter.",
+                    apfpv ? "APFPV" : "WFB", com.openipc.pixelpilot.apfpv.RfLimits.mw(cap),
+                    gain, cond, com.openipc.pixelpilot.apfpv.RfLimits.mw(cond), idx),
+                    Toast.LENGTH_LONG).show();
+            }
+            return true;
+        });
 
         // Adaptive use FEC submenu
         boolean fecEnabled = prefs.getBoolean("custom_fec_enabled", true);
