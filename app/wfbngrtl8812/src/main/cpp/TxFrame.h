@@ -6,7 +6,7 @@ extern "C" {
 #include "wfb-ng/src/zfex.h" // FEC library
 }
 
-#include "devourer/src/Rtl8812aDevice.h" // Rtl8812aDevice definition
+#include "devourer/src/RtlJaguarDevice.h" // RtlJaguarDevice definition (formerly Rtl8812aDevice)
 #include "wfb-ng/src/wifibroadcast.hpp"  // Wifibroadcast definitions
 
 // -- System / C++ Includes --

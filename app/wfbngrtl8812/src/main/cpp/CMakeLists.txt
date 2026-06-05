@@ -30,13 +30,27 @@ add_library(devourer STATIC
         ${CMAKE_SOURCE_DIR}/devourer/hal/Hal8812PhyReg.h
         ${CMAKE_SOURCE_DIR}/devourer/hal/Hal8812PwrSeq.c
         ${CMAKE_SOURCE_DIR}/devourer/hal/Hal8812PwrSeq.h
+        ${CMAKE_SOURCE_DIR}/devourer/hal/Hal8812a_TxPwrTrack.cpp
+        ${CMAKE_SOURCE_DIR}/devourer/hal/Hal8812a_TxPwrTrack.h
+        ${CMAKE_SOURCE_DIR}/devourer/hal/Hal8814_PostFwdlReplay.h
+        ${CMAKE_SOURCE_DIR}/devourer/hal/Hal8814PwrSeq.c
+        ${CMAKE_SOURCE_DIR}/devourer/hal/Hal8814PwrSeq.h
+        ${CMAKE_SOURCE_DIR}/devourer/hal/Hal8821APwrSeq.c
+        ${CMAKE_SOURCE_DIR}/devourer/hal/Hal8821APwrSeq.h
+        ${CMAKE_SOURCE_DIR}/devourer/hal/Hal8821PhyReg.h
         ${CMAKE_SOURCE_DIR}/devourer/hal/basic_types.h
         ${CMAKE_SOURCE_DIR}/devourer/hal/hal8812a_fw.c
         ${CMAKE_SOURCE_DIR}/devourer/hal/hal8812a_fw.h
+        ${CMAKE_SOURCE_DIR}/devourer/hal/hal8814a_fw.c
+        ${CMAKE_SOURCE_DIR}/devourer/hal/hal8814a_fw.h
+        ${CMAKE_SOURCE_DIR}/devourer/hal/hal8821a_fw.c
+        ${CMAKE_SOURCE_DIR}/devourer/hal/hal8821a_fw.h
         ${CMAKE_SOURCE_DIR}/devourer/hal/hal_com_reg.h
         ${CMAKE_SOURCE_DIR}/devourer/hal/rtl8812a_hal.h
         ${CMAKE_SOURCE_DIR}/devourer/hal/rtl8812a_recv.h
         ${CMAKE_SOURCE_DIR}/devourer/hal/rtl8812a_spec.h
+        ${CMAKE_SOURCE_DIR}/devourer/hal/phydm/rtl8814a/Hal8814_PhyTables.c
+        ${CMAKE_SOURCE_DIR}/devourer/hal/phydm/rtl8814a/Hal8814_PhyTables.h
 
         ${CMAKE_SOURCE_DIR}/devourer/src/Radiotap.c
         ${CMAKE_SOURCE_DIR}/devourer/src/registry_priv.h
@@ -51,6 +65,16 @@ add_library(devourer STATIC
         ${CMAKE_SOURCE_DIR}/devourer/src/FrameParser.h
         ${CMAKE_SOURCE_DIR}/devourer/src/HalModule.cpp
         ${CMAKE_SOURCE_DIR}/devourer/src/HalModule.h
+        ${CMAKE_SOURCE_DIR}/devourer/src/Iqk8812a.cpp
+        ${CMAKE_SOURCE_DIR}/devourer/src/Iqk8812a.h
+        ${CMAKE_SOURCE_DIR}/devourer/src/Iqk8814a.cpp
+        ${CMAKE_SOURCE_DIR}/devourer/src/Iqk8814a.h
+        ${CMAKE_SOURCE_DIR}/devourer/src/PhydmWatchdog.cpp
+        ${CMAKE_SOURCE_DIR}/devourer/src/PhydmWatchdog.h
+        ${CMAKE_SOURCE_DIR}/devourer/src/PhyTableLoader.cpp
+        ${CMAKE_SOURCE_DIR}/devourer/src/PhyTableLoader.h
+        ${CMAKE_SOURCE_DIR}/devourer/src/PowerTracking8812a.cpp
+        ${CMAKE_SOURCE_DIR}/devourer/src/PowerTracking8812a.h
         ${CMAKE_SOURCE_DIR}/devourer/src/ParsedRadioPacket.cpp
         ${CMAKE_SOURCE_DIR}/devourer/src/RadioManagementModule.cpp
         ${CMAKE_SOURCE_DIR}/devourer/src/RadioManagementModule.h
@@ -91,6 +115,8 @@ set_target_properties(devourer PROPERTIES INTERFACE_INCLUDE_DIRECTORIES ${CMAKE_
 
 target_include_directories(devourer PUBLIC ${CMAKE_SOURCE_DIR}/devourer)
 target_include_directories(devourer PUBLIC ${CMAKE_SOURCE_DIR}/devourer/hal)
+target_include_directories(devourer PUBLIC ${CMAKE_SOURCE_DIR}/devourer/hal/phydm/rtl8814a)
+target_include_directories(devourer PUBLIC ${CMAKE_SOURCE_DIR}/devourer/src)
 set_property(TARGET devourer PROPERTY CXX_STANDARD 20)
 
 # WFB-NG RTL8812 library

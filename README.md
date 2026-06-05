@@ -94,21 +94,15 @@ incorrectly and breaks NDK discovery):
 sdk.dir=C:/Android/sdk
 ```
 
-### 3. Prebuilt native libraries (required)
+### 3. Prebuilt native libraries
 
-The native modules link against vendored prebuilt `.so` files, one set per ABI:
+The native modules link against vendored prebuilt `.so`/`.a` files, one set per
+ABI, all checked into the tree:
 
 - `app/wfbngrtl8812/src/main/cpp/libs/<abi>/` → `libusb1.0.so`, `libsodium.so`, `libpcap.a`
 - `app/videonative/src/main/cpp/libs/<abi>/` → `libopus.so`
 
-> [!WARNING]
-> Not all of these prebuilt binaries are checked into this tree — `libusb1.0.so`
-> (unversioned), `libsodium.so` and `libopus.so` may be missing for one or both
-> ABIs, and the native build fails at link with
-> `ninja: error: '…/libXXX.so' … missing and no known rule to make it`.
-> Copy the matching prebuilt libraries for `arm64-v8a` and `armeabi-v7a` from the
-> upstream [OpenIPC/PixelPilot](https://github.com/OpenIPC/PixelPilot) tree (same
-> `libs/<abi>/` paths) before building.
+No action needed — they are committed for both `arm64-v8a` and `armeabi-v7a`.
 
 ### 4. Assemble
 
@@ -117,7 +111,9 @@ The native modules link against vendored prebuilt `.so` files, one set per ABI:
 .\gradlew.bat :app:assembleDebug    # Windows
 ```
 
-The APK is written to `app/build/outputs/apk/debug/`.
+The APK is written to `app/build/outputs/apk/debug/app-debug.apk`. A debug build
+is verified working with the toolchain above (devourer + APFPV station stack +
+wfb-ng all cross-compiled and packaged for both ABIs).
 
 ## Installation
 
