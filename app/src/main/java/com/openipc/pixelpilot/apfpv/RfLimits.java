@@ -30,19 +30,43 @@ public final class RfLimits {
 
     public static final double DEFAULT_ANTENNA_GAIN_DB = 6.0;
 
-    // RTL8812AU 0..63 index linear estimate (card-dependent — see class doc).
-    static final double IDX_PER_DB = 2.0;   // ~0.5 dB per index step
-    static final double IDX0_DBM   = 0.0;   // index 0 ~= 0 dBm (anchor)
+    // Measured RTL8812AU index<->conducted-power, from OpenHD's HackRF table for
+    // the ASUS AC56-USB (a bare 8812au, used as a proxy for the EMAX VRX — STILL
+    // card-dependent, so verify if you can). Endpoints 0 and 63 are extrapolated.
+    //   idx 19=>10-12mW 25=>25-30 30=>45-50 35=>70-80 37=>100-110 40=>120-140
+    //       45=>200-230 50=>280-320 55=>380-400 58=>420-450 (mW)
+    private static final int[]    IDX = {   0,   19,   25,   30,   35,   37,   40,   45,   50,   55,   58,   63 };
+    private static final double[] DBM = { 2.6, 10.4, 14.4, 16.8, 18.8, 20.2, 21.1, 23.3, 24.8, 25.9, 26.4, 27.5 };
 
     /** Target conducted power (dBm) to hold the EIRP cap with the given antenna. */
     public static double conductedDbm(double eirpCapDbm, double antennaGainDb) {
         return eirpCapDbm - antennaGainDb;
     }
 
-    /** Map a conducted power (dBm) to the RTL8812AU 0..63 power index (clamped). */
+    /** Map a conducted power (dBm) to the RTL8812AU 0..63 index via the measured
+     *  table (piecewise-linear, clamped). */
     public static int conductedToIndex(double conductedDbm) {
-        int idx = (int) Math.round((conductedDbm - IDX0_DBM) * IDX_PER_DB);
-        return Math.max(0, Math.min(63, idx));
+        if (conductedDbm <= DBM[0]) return IDX[0];
+        for (int i = 1; i < DBM.length; i++) {
+            if (conductedDbm <= DBM[i]) {
+                double f = (conductedDbm - DBM[i - 1]) / (DBM[i] - DBM[i - 1]);
+                int idx = (int) Math.round(IDX[i - 1] + f * (IDX[i] - IDX[i - 1]));
+                return Math.max(0, Math.min(63, idx));
+            }
+        }
+        return 63;
+    }
+
+    /** Inverse: approximate conducted dBm for a given index (for display). */
+    public static double indexToDbm(int idx) {
+        if (idx <= IDX[0]) return DBM[0];
+        for (int i = 1; i < IDX.length; i++) {
+            if (idx <= IDX[i]) {
+                double f = (double) (idx - IDX[i - 1]) / (IDX[i] - IDX[i - 1]);
+                return DBM[i - 1] + f * (DBM[i] - DBM[i - 1]);
+            }
+        }
+        return DBM[DBM.length - 1];
     }
 
     /** Legal TX power index for an EIRP cap + antenna gain (clamped 0..63). */
