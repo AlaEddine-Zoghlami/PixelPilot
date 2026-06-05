@@ -102,6 +102,31 @@ public class ApfpvLinkManager {
         if (staLink != null) staLink.disconnect();
     }
 
+    /** Open the first RTL8812AU dongle and run an all-SSID scan for the picker.
+     *  Results stream to the listener on a worker thread (marshal UI updates).
+     *  Returns false if there's no dongle / permission / driver yet. */
+    public synchronized boolean scanSsids(int perChannelMs, ApfpvStaLink.ScanListener l) {
+        UsbManager mgr = (UsbManager) context.getSystemService(Context.USB_SERVICE);
+        if (mgr == null || staLink == null || staLink.handle() == 0L) return false;
+        UsbDevice dev = null;
+        for (UsbDevice d : mgr.getDeviceList().values())
+            if (d.getVendorId() == 0x0bda) { dev = d; break; }   // Realtek
+        if (dev == null) { showMessage("APFPV: no RTL8812AU dongle to scan"); return false; }
+        if (!mgr.hasPermission(dev)) {
+            requestPermission(mgr, dev);
+            showMessage("APFPV: allow USB access, then scan again");
+            return false;
+        }
+        UsbDeviceConnection conn = mgr.openDevice(dev);
+        if (conn == null) { showMessage("APFPV: couldn't open dongle to scan"); return false; }
+        int fd = conn.getFileDescriptor();
+        if (fd < 0) { conn.close(); return false; }
+        Telemetry.event("apfpv_scan", "vidpid",
+                String.format("%04X:%04X", dev.getVendorId(), dev.getProductId()));
+        staLink.scan(fd, perChannelMs, l);
+        return true;
+    }
+
     // --- mirrors WfbLinkManager.startAdapter, but credentialed + stateful ----
     // Every external precondition here can fail at runtime (no device, permission
     // not yet granted, the dongle still claimed by the WFB stack we just stopped,

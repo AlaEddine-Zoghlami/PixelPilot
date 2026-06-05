@@ -1022,6 +1022,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
 
         // APFPV connection actions (simple items on the main menu, gs-style)
         SubMenu m = popup.getMenu().addSubMenu("APFPV");
+        m.add("Scan SSIDs...").setOnMenuItemClickListener(i -> { showApfpvScanDialog(); return true; });
         m.add("SSID / Password...").setOnMenuItemClickListener(i -> { showApfpvCredsDialog(); return true; });
         m.add("Reconnect").setOnMenuItemClickListener(i -> {
             if (apfpvLinkManager != null) apfpvLinkManager.refreshAdapters(); return true; });
@@ -1154,6 +1155,49 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
     private void saveApfpv(com.openipc.pixelpilot.apfpv.ApfpvSettings c) {
         getSharedPreferences("pixelpilot", MODE_PRIVATE).edit()
             .putString("aalink_mcs", c.mcsSource).putInt("aalink_tput", c.throughputPct).apply();
+    }
+
+    /** Live SSID picker: kicks off a dongle RF scan and fills a list as APs are
+     *  found. Tapping one stores it as the APFPV SSID (password entered separately). */
+    private void showApfpvScanDialog() {
+        if (apfpvLinkManager == null) return;
+        final java.util.List<String> labels = new java.util.ArrayList<>();
+        final java.util.List<String> ssids  = new java.util.ArrayList<>();
+        final java.util.Set<String> seen    = new java.util.HashSet<>();
+        final android.widget.ArrayAdapter<String> adapter =
+            new android.widget.ArrayAdapter<>(this, android.R.layout.simple_list_item_1, labels);
+
+        final android.app.AlertDialog dlg = new android.app.AlertDialog.Builder(this)
+            .setTitle("Scanning for SSIDs…")
+            .setAdapter(adapter, (d, which) -> {
+                String chosen = ssids.get(which);
+                getSharedPreferences("pixelpilot", MODE_PRIVATE).edit()
+                    .putString("apfpv_ssid", chosen).apply();
+                android.widget.Toast.makeText(this, "APFPV SSID: " + chosen,
+                        android.widget.Toast.LENGTH_SHORT).show();
+                if (apfpvLinkManager != null) apfpvLinkManager.setCredentials(chosen,
+                    getSharedPreferences("pixelpilot", MODE_PRIVATE).getString("apfpv_pass", "12345678"));
+            })
+            .setNegativeButton("Close", null)
+            .create();
+        dlg.show();
+
+        // ~250ms/channel sweep; results stream in on the scan worker thread.
+        boolean started = apfpvLinkManager.scanSsids(250, new ApfpvStaLink.ScanListener() {
+            @Override public void onSsid(String ssid, int channel, int dbm) {
+                runOnUiThread(() -> {
+                    if (!seen.add(ssid)) return;
+                    ssids.add(ssid);
+                    labels.add(ssid + "   (ch " + channel + ", " + dbm + " dBm)");
+                    adapter.notifyDataSetChanged();
+                });
+            }
+            @Override public void onScanDone() {
+                runOnUiThread(() -> dlg.setTitle(labels.isEmpty()
+                        ? "No SSIDs found — tap Close" : "Select an SSID"));
+            }
+        });
+        if (!started) dlg.setTitle("Scan unavailable (no dongle/permission)");
     }
 
     /** Minimal SSID/password entry for APFPV association. */

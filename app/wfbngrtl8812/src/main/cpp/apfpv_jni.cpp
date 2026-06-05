@@ -174,6 +174,55 @@ Java_com_openipc_wfbngrtl8812_ApfpvStaLink_nativeStaDisconnect(JNIEnv*, jclass, 
     if (ctx && ctx->station) ctx->station->disconnect();
 }
 
+// All-SSID scan for the picker UI. Adopts the fd + builds the device/station if
+// needed (scan happens BEFORE connect), then channel-hops collecting beacons and
+// calls Java onNativeScanResult(ssid, channel, rssi) per discovered SSID.
+// BLOCKS for the whole sweep — Java must call this on a worker thread.
+JNIEXPORT void JNICALL
+Java_com_openipc_wfbngrtl8812_ApfpvStaLink_nativeStaScan(
+        JNIEnv* env, jclass, jlong inst, jobject jlink, jint fd, jint perChannelMs) {
+    auto* ctx = reinterpret_cast<StaCtx*>(inst);
+    if (!ctx || !ctx->usb) return;
+    if (!ctx->jlink) ctx->jlink = env->NewGlobalRef(jlink);
+    if (!ctx->handle) {
+        if (libusb_wrap_sys_device(ctx->usb, (intptr_t)fd, &ctx->handle) < 0 || !ctx->handle) {
+            LOGE("scan: libusb_wrap_sys_device failed (fd=%d)", fd); return;
+        }
+    }
+    if (!ctx->station) {
+        try {
+            ctx->driver = std::make_unique<WiFiDriver>(nullptr);
+            ctx->rtl = ctx->driver->CreateRtlDevice(ctx->handle);
+            if (!ctx->rtl) { LOGE("scan: CreateRtlDevice returned null"); return; }
+            StaCtx* c = ctx;
+            auto onState = [c](ApfpvStation::State s){ postState(c, s); };
+            auto onRtp   = [](const uint8_t*, size_t){};
+            ctx->station = std::make_unique<ApfpvStation>(
+                &ctx->rtl->adapter(), &ctx->rtl->radioManager(), onRtp, onState);
+            ctx->station->setDevice(ctx->rtl.get());
+        } catch (...) { LOGE("scan: device setup threw"); return; }
+    }
+    jobject link = ctx->jlink;
+    auto onAp = [ctx, link](const std::string& ssid, const ApInfo& info) {
+        if (!ctx->jvm || !link) return;
+        JNIEnv* e = nullptr; bool att = false;
+        jint r = ctx->jvm->GetEnv(reinterpret_cast<void**>(&e), JNI_VERSION_1_6);
+        if (r == JNI_EDETACHED) { if (ctx->jvm->AttachCurrentThread(&e, nullptr) != JNI_OK || !e) return; att = true; }
+        else if (r != JNI_OK || !e) return;
+        jclass cls = e->GetObjectClass(link);
+        if (cls) {
+            jmethodID m = e->GetMethodID(cls, "onNativeScanResult", "(Ljava/lang/String;II)V");
+            if (m) { jstring js = e->NewStringUTF(ssid.c_str());
+                     e->CallVoidMethod(link, m, js, (jint)info.channel, (jint)info.rssi);
+                     if (js) e->DeleteLocalRef(js); }
+            e->DeleteLocalRef(cls);
+        }
+        if (att) ctx->jvm->DetachCurrentThread();
+    };
+    try { ctx->station->scanAll(perChannelMs > 0 ? perChannelMs : 250, onAp); }
+    catch (...) { LOGE("scanAll threw"); }
+}
+
 JNIEXPORT jint JNICALL
 Java_com_openipc_wfbngrtl8812_ApfpvStaLink_nativeStaGetState(JNIEnv*, jclass, jlong inst) {
     auto* ctx = reinterpret_cast<StaCtx*>(inst);

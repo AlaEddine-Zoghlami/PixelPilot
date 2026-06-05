@@ -62,6 +62,12 @@ public class ApfpvStaLink {
         void onError(String detail);
     }
 
+    /** Per-SSID callback for the dongle RF scan (delivered as APs are found). */
+    public interface ScanListener {
+        void onSsid(String ssid, int channel, int dbm);
+        void onScanDone();
+    }
+
     private final long nativeStaLink;
 
     /** Native ApfpvStation handle for the manager to pass to native calls. */
@@ -78,6 +84,11 @@ public class ApfpvStaLink {
     public static native void nativeStaConnect(long inst, ApfpvStaLink link, int fd, int channel, int bandwidth, String ssid, String pass);
 
     public static native void nativeStaDisconnect(long inst, int fd);
+
+    // All-SSID RF scan via the dongle. BLOCKS for the whole channel sweep, so it
+    // is only ever invoked from the worker thread in scan() below. Results arrive
+    // on the same worker thread via onNativeScanResult.
+    public static native void nativeStaScan(long inst, ApfpvStaLink link, int fd, int perChannelMs);
 
     // Poll/observe the lifecycle (delivered via registered callback below).
     public static native int  nativeStaGetState(long inst);   // -> StaState ordinal
@@ -101,6 +112,24 @@ public class ApfpvStaLink {
     // status callback (native -> java), same pattern as WfbNgLink.nativeCallBack
     private StaStatusListener listener;
     public void setStatusListener(StaStatusListener l) { this.listener = l; }
+
+    private volatile ScanListener scanListener;
+    /** Run an all-SSID dongle scan on a worker thread (nativeStaScan blocks for
+     *  the whole channel sweep). Results stream via ScanListener.onSsid; onScanDone
+     *  fires when the sweep ends. */
+    public void scan(int fd, int perChannelMs, ScanListener l) {
+        this.scanListener = l;
+        new Thread(() -> {
+            try { nativeStaScan(nativeStaLink, this, fd, perChannelMs); }
+            finally { ScanListener sl = scanListener; if (sl != null) sl.onScanDone(); }
+        }, "apfpv-scan").start();
+    }
+    // called FROM native (on the scan worker thread) per discovered SSID
+    @SuppressWarnings("unused")
+    private void onNativeScanResult(String ssid, int channel, int dbm) {
+        ScanListener sl = scanListener;
+        if (sl != null && ssid != null && !ssid.isEmpty()) sl.onSsid(ssid, channel, dbm);
+    }
 
     private int currentFd = -1;
     /** Instance wrapper: associate this dongle (fd) to the AP in station mode. */
