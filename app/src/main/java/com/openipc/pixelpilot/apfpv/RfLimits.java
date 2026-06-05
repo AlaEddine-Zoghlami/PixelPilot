@@ -78,4 +78,34 @@ public final class RfLimits {
     public static int mw(double dbm) {
         return (int) Math.round(Math.pow(10.0, dbm / 10.0));
     }
+
+    // ---- EIRP estimation from a received RSSI (no meter needed) --------------
+
+    /** Free-space path loss (dB) at distance d (m), frequency f (MHz). */
+    public static double fsplDb(double dMeters, double fMHz) {
+        if (dMeters < 0.1) dMeters = 0.1;
+        return 20.0 * Math.log10(dMeters) + 20.0 * Math.log10(fMHz) - 27.55;
+    }
+
+    /** Estimate a TRANSMITTER's EIRP (dBm) from a received RSSI at distance d.
+     *  rxGainDbi = the MEASURING receiver's antenna gain (phone internal ~0;
+     *  the VRX dongle omni ~2 / patch ~8 if the dongle is the measurer). */
+    public static double estimateEirpDbm(double rssiDbm, double dMeters, double fMHz, double rxGainDbi) {
+        return rssiDbm + fsplDb(dMeters, fMHz) - rxGainDbi;
+    }
+
+    /** 5/2.4 GHz channel -> centre frequency (MHz). */
+    public static int channelToFreqMHz(int ch) {
+        if (ch >= 14 && ch <= 196) return 5000 + 5 * ch;     // 5 GHz
+        if (ch == 14) return 2484;
+        if (ch >= 1 && ch <= 13) return 2407 + 5 * ch;       // 2.4 GHz
+        return 5200;                                         // fallback UNII-1
+    }
+
+    /** Legal EIRP cap (dBm) for a frequency, or NaN if outside the regulated bands. */
+    public static double eirpCapForFreq(double fMHz) {
+        if (fMHz >= 5170 && fMHz <= 5250) return EIRP_APFPV_DBM;   // UNII-1 200 mW
+        if (fMHz >= 5725 && fMHz <= 5875) return EIRP_WFB_DBM;     // 5.8 GHz 25 mW
+        return Double.NaN;
+    }
 }

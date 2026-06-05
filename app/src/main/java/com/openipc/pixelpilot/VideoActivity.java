@@ -1084,6 +1084,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
                 android.widget.Toast.LENGTH_LONG).show();
             return true;
         });
+        m.add("EIRP estimate…").setOnMenuItemClickListener(i -> { showEirpEstimatorDialog(); return true; });
         m.add("Reconnect").setOnMenuItemClickListener(i -> {
             if (apfpvLinkManager != null) apfpvLinkManager.refreshAdapters(); return true; });
         // Mode-aware status: dongle has the full funnel (adapter -> connecting ->
@@ -1337,6 +1338,101 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
                     android.widget.Toast.LENGTH_SHORT).show();
             })
             .setNegativeButton("Cancel", null)
+            .show();
+    }
+
+    /** EIRP estimator (no meter): pick a transmitter SSID from the phone's Wi-Fi
+     *  scan, enter the distance, and estimate its EIRP via Friis from the phone
+     *  RSSI. The VTX (an AP) is measurable; the VRX (a station, no SSID) is shown
+     *  COMPUTED from its commanded TX index + antenna gain. */
+    private void showEirpEstimatorDialog() {
+        android.net.wifi.WifiManager wifi = (android.net.wifi.WifiManager)
+                getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+        if (wifi == null) { Toast.makeText(this, "No Wi-Fi service", Toast.LENGTH_SHORT).show(); return; }
+        // Scan results (SSID + RSSI + freq) require ACCESS_FINE_LOCATION + location on.
+        if (androidx.core.content.ContextCompat.checkSelfPermission(this,
+                android.Manifest.permission.ACCESS_FINE_LOCATION) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            androidx.core.app.ActivityCompat.requestPermissions(this,
+                    new String[]{ android.Manifest.permission.ACCESS_FINE_LOCATION }, 0xE1);
+            Toast.makeText(this, "Grant Location for Wi-Fi scan, then tap EIRP estimate again", Toast.LENGTH_LONG).show();
+            return;
+        }
+        try { wifi.startScan(); } catch (Exception ignored) {}
+        java.util.List<android.net.wifi.ScanResult> results;
+        try { results = wifi.getScanResults(); } catch (Exception e) { results = null; }
+        if (results == null || results.isEmpty()) {
+            Toast.makeText(this, "No Wi-Fi scan results — turn on Wi-Fi + Location and retry", Toast.LENGTH_LONG).show();
+            return;
+        }
+        java.util.Collections.sort(results, (a, b) -> Integer.compare(b.level, a.level));   // strongest first
+        final java.util.List<android.net.wifi.ScanResult> aps = new java.util.ArrayList<>(results);
+        final String[] labels = new String[aps.size()];
+        for (int i = 0; i < aps.size(); i++) {
+            android.net.wifi.ScanResult r = aps.get(i);
+            String ss = (r.SSID == null || r.SSID.isEmpty()) ? "(hidden)" : r.SSID;
+            labels[i] = ss + "   " + r.level + " dBm, " + r.frequency + " MHz";
+        }
+        new android.app.AlertDialog.Builder(this)
+            .setTitle("EIRP estimate — pick the transmitter (VTX)")
+            .setItems(labels, (d, which) -> {
+                android.net.wifi.ScanResult ap = aps.get(which);
+                promptDistanceAndEstimate(ap.SSID == null ? "" : ap.SSID, ap.level, ap.frequency);
+            })
+            .setNegativeButton("Cancel", null)
+            .show();
+    }
+
+    private void promptDistanceAndEstimate(String ssid, int rssiDbm, int freqMHz) {
+        final android.widget.EditText dist = new android.widget.EditText(this);
+        dist.setInputType(android.text.InputType.TYPE_CLASS_NUMBER | android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL);
+        dist.setHint("Distance 0.1–5 m");
+        new android.app.AlertDialog.Builder(this)
+            .setTitle("Distance to \"" + ssid + "\"")
+            .setMessage("RSSI " + rssiDbm + " dBm @ " + freqMHz + " MHz.\nLine-of-sight distance (0.1–5 m). ~1–2 m reads best — too close can saturate the RSSI.")
+            .setView(dist)
+            .setPositiveButton("Estimate", (d, w2) -> {
+                double dm;
+                try { dm = Double.parseDouble(dist.getText().toString().trim()); } catch (Exception e) { dm = 0; }
+                if (dm <= 0) { Toast.makeText(this, "Enter a distance > 0 m", Toast.LENGTH_SHORT).show(); return; }
+                showEirpResult(ssid, rssiDbm, freqMHz, dm);
+            })
+            .setNegativeButton("Cancel", null)
+            .show();
+    }
+
+    private void showEirpResult(String ssid, int rssiDbm, int freqMHz, double dMeters) {
+        final double phoneGain = 0.0;   // phone internal Wi-Fi antenna ~0 dBi
+        double eirp = com.openipc.pixelpilot.apfpv.RfLimits.estimateEirpDbm(rssiDbm, dMeters, freqMHz, phoneGain);
+        double cap = com.openipc.pixelpilot.apfpv.RfLimits.eirpCapForFreq(freqMHz);
+        StringBuilder sb = new StringBuilder();
+        sb.append(String.format(java.util.Locale.US,
+            "VTX \"%s\" — MEASURED\n  %d dBm @ %d MHz, %.0f m, phone ant ~0 dBi\n  → EIRP ≈ %.0f dBm (~%d mW)\n",
+            ssid, rssiDbm, freqMHz, dMeters, eirp, com.openipc.pixelpilot.apfpv.RfLimits.mw(eirp)));
+        if (!Double.isNaN(cap)) {
+            sb.append(String.format(java.util.Locale.US, "  cap %d mW (%.0f dBm) → %s by %.0f dB\n",
+                com.openipc.pixelpilot.apfpv.RfLimits.mw(cap), cap,
+                eirp <= cap ? "WITHIN" : "OVER", Math.abs(eirp - cap)));
+        } else {
+            sb.append("  (freq outside DE APFPV/WFB bands — no cap)\n");
+        }
+        // VRX has no SSID to measure -> compute from the commanded TX index + gain.
+        int idx = getSharedPreferences("general", MODE_PRIVATE).getInt("adaptive_tx_power", 20);
+        float gain = getSharedPreferences("pixelpilot", MODE_PRIVATE)
+                .getFloat("antenna_gain_db", (float) com.openipc.pixelpilot.apfpv.RfLimits.DEFAULT_ANTENNA_GAIN_DB);
+        double cond = com.openipc.pixelpilot.apfpv.RfLimits.indexToDbm(idx);
+        double eirpVrx = cond + gain;
+        boolean apfpv = (linkMode == LinkModeCoordinator.Mode.APFPV);
+        double vrxCap = apfpv ? com.openipc.pixelpilot.apfpv.RfLimits.EIRP_APFPV_DBM
+                              : com.openipc.pixelpilot.apfpv.RfLimits.EIRP_WFB_DBM;
+        sb.append(String.format(java.util.Locale.US,
+            "\nVRX dongle — COMPUTED (no SSID to measure)\n  TX idx %d → %.0f dBm + %.0f dBi ant\n  → EIRP ≈ %.0f dBm (~%d mW), cap %d mW → %s\n",
+            idx, cond, gain, eirpVrx, com.openipc.pixelpilot.apfpv.RfLimits.mw(eirpVrx),
+            com.openipc.pixelpilot.apfpv.RfLimits.mw(vrxCap), eirpVrx <= vrxCap ? "WITHIN" : "OVER"));
+        sb.append("\n±3–6 dB. Do it outdoors, line-of-sight; average a few distances.");
+        new android.app.AlertDialog.Builder(this)
+            .setTitle("EIRP estimate")
+            .setMessage(sb.toString())
+            .setPositiveButton("OK", null)
             .show();
     }
 
