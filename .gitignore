@@ -16,6 +16,10 @@
 local.properties
 /.idea
 .idea
+# Release signing keystore — never commit signing keys
+/fpv.jks
+*.jks
+*.keystore
 /app/mavlink/compile_commands.json
 /app/videonative/compile_commands.json
 /app/wfbngrtl8812/compile_commands.json
