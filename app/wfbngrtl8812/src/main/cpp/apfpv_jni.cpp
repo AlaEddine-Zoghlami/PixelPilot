@@ -63,6 +63,37 @@ static void postState(StaCtx* ctx, ApfpvStation::State s) {
     if (weAttached) ctx->jvm->DetachCurrentThread();  // never detach the caller's thread
 }
 
+// Build the device + station ONCE and keep it for the ctx's lifetime. Both the
+// scan and the connect reuse it — rebuilding it (the old code did) destroyed a
+// device whose RX read thread was still running, so that thread then locked a
+// freed mutex -> 'pthread_mutex_lock on a destroyed mutex' SIGABRT.
+static bool ensureStation(StaCtx* ctx) {
+    if (ctx->station) return true;
+    if (!ctx->usb || !ctx->handle) return false;
+    if (ctx->rtpSock < 0) {
+        ctx->rtpSock = ::socket(AF_INET, SOCK_DGRAM, 0);
+        std::memset(&ctx->rtpDst, 0, sizeof(ctx->rtpDst));
+        ctx->rtpDst.sin_family = AF_INET;
+        ctx->rtpDst.sin_port = htons(5600);
+        ::inet_pton(AF_INET, "127.0.0.1", &ctx->rtpDst.sin_addr);
+    }
+    StaCtx* c = ctx;
+    auto onRtp = [c](const uint8_t* rtp, size_t len) {
+        if (c->rtpSock >= 0 && rtp && len)
+            ::sendto(c->rtpSock, rtp, len, 0, (sockaddr*)&c->rtpDst, sizeof(c->rtpDst));
+    };
+    auto onState = [c](ApfpvStation::State s){ postState(c, s); };
+    try {
+        ctx->driver = std::make_unique<WiFiDriver>(nullptr /*Logger_t*/);
+        ctx->rtl = ctx->driver->CreateRtlDevice(ctx->handle);
+        if (!ctx->rtl) { LOGE("CreateRtlDevice returned null"); return false; }
+        ctx->station = std::make_unique<ApfpvStation>(
+            &ctx->rtl->adapter(), &ctx->rtl->radioManager(), onRtp, onState);
+        ctx->station->setDevice(ctx->rtl.get());
+    } catch (...) { LOGE("ensureStation: device setup threw"); return false; }
+    return true;
+}
+
 extern "C" {
 
 JNIEXPORT jlong JNICALL
@@ -91,76 +122,40 @@ Java_com_openipc_wfbngrtl8812_ApfpvStaLink_nativeStaConnect(
         jint channel, jint bandwidth, jstring jssid, jstring jpass) {
     auto* ctx = reinterpret_cast<StaCtx*>(inst);
     if (!ctx) return;
-    ctx->jlink = env->NewGlobalRef(jlink);
+    if (!ctx->jlink) ctx->jlink = env->NewGlobalRef(jlink);
 
     // libusb must have initialized in nativeStaInitialize (option set before init).
     // If it didn't, bail with a FAIL state instead of dereferencing a null context.
     if (!ctx->usb) {
         LOGE("libusb context null — cannot connect"); postState(ctx, ApfpvStation::State::FailNoAp); return;
     }
-    // Unrooted USB-host path (same as the wfb monitor path): adopt the fd. The
-    // NO_DEVICE_DISCOVERY option was already set before libusb_init; do not repeat
-    // it here against the live context.
-    if (libusb_wrap_sys_device(ctx->usb, (intptr_t)fd, &ctx->handle) < 0 || !ctx->handle) {
-        LOGE("libusb_wrap_sys_device failed (fd=%d)", fd);
-        postState(ctx, ApfpvStation::State::FailNoAp); return;
+    // Unrooted USB-host path (same as the wfb monitor path): adopt the fd ONCE.
+    // The scan may already have wrapped it — don't re-wrap (that leaks handles).
+    if (!ctx->handle) {
+        if (libusb_wrap_sys_device(ctx->usb, (intptr_t)fd, &ctx->handle) < 0 || !ctx->handle) {
+            LOGE("libusb_wrap_sys_device failed (fd=%d)", fd);
+            postState(ctx, ApfpvStation::State::FailNoAp); return;
+        }
     }
+
+    // Build (or reuse) the device + station — same instance the scan used, so we
+    // never destroy a device whose RX thread is still running.
+    if (!ensureStation(ctx)) { postState(ctx, ApfpvStation::State::FailNoAp); return; }
 
     const char* ssid = env->GetStringUTFChars(jssid, nullptr);
     const char* pass = env->GetStringUTFChars(jpass, nullptr);
-
-    // RTP delivery socket: native RX hands recovered RTP here; we sendto
-    // 127.0.0.1:5600 so PixelPilot's existing VideoPlayer (binds INADDR_ANY:5600)
-    // renders it with ZERO decoder changes — same as the wfb path's output.
-    if (ctx->rtpSock < 0) {
-        ctx->rtpSock = ::socket(AF_INET, SOCK_DGRAM, 0);
-        std::memset(&ctx->rtpDst, 0, sizeof(ctx->rtpDst));
-        ctx->rtpDst.sin_family = AF_INET;
-        ctx->rtpDst.sin_port = htons(5600);
-        ::inet_pton(AF_INET, "127.0.0.1", &ctx->rtpDst.sin_addr);
-    }
-    StaCtx* c = ctx;   // capture for the lambda
-    auto onRtp = [c](const uint8_t* rtp, size_t len) {
-        if (c->rtpSock >= 0 && rtp && len)
-            ::sendto(c->rtpSock, rtp, len, 0, (sockaddr*)&c->rtpDst, sizeof(c->rtpDst));
-    };
-    auto onState = [ctx](ApfpvStation::State s){ postState(ctx, s); };
-
-    // Build the real driver objects from the adopted libusb handle. WiFiDriver
-    // owns the RtlUsbAdapter + RadioManagementModule; ApfpvStation drives them.
-    // NOTE: WiFiDriver's public accessors for adapter/radio must be used here —
-    // passing nullptr (as the earlier scaffold did) would crash. The exact
-    // accessor names depend on the devourer build; wire them when compiling:
-    //   ctx->station = std::make_unique<ApfpvStation>(
-    //       ctx->driver->adapter(), ctx->driver->radioManager(), onRtp, onState);
-    // Real devourer factory path: WiFiDriver.CreateRtlDevice(handle) builds the
-    // RtlJaguarDevice (which owns the RtlUsbAdapter + RadioManagementModule).
-    // The whole bring-up is wrapped: a C++ exception (bad device, alloc, driver
-    // assertion) must NOT propagate across the JNI boundary — that calls
-    // std::terminate -> abort (SIGABRT). On any failure we post a FAIL state.
     try {
-        ctx->driver = std::make_unique<WiFiDriver>(nullptr /*Logger_t*/);
-        ctx->rtl = ctx->driver->CreateRtlDevice(ctx->handle);
-        if (!ctx->rtl) {
-            LOGE("CreateRtlDevice returned null");
-            postState(ctx, ApfpvStation::State::FailNoAp);
-            env->ReleaseStringUTFChars(jssid, ssid);
-            env->ReleaseStringUTFChars(jpass, pass);
-            return;
-        }
-        ctx->station = std::make_unique<ApfpvStation>(
-            &ctx->rtl->adapter(), &ctx->rtl->radioManager(), onRtp, onState);
-        ctx->station->setDevice(ctx->rtl.get());   // RX path: device -> RxDeframe
-
+        // Stop any prior scan/supervisor on this device before a fresh connect.
+        ctx->station->disconnect();
         ApfpvStation::Params p;
         p.channel = channel; p.bandwidth = bandwidth;
         p.ssid = ssid; p.passphrase = pass; p.lqFeedback = true;
         ctx->station->connect(p);     // runs the gated chain; states -> Java
     } catch (const std::exception& e) {
-        LOGE("APFPV bring-up threw: %s", e.what());
+        LOGE("APFPV connect threw: %s", e.what());
         postState(ctx, ApfpvStation::State::FailNoAp);
     } catch (...) {
-        LOGE("APFPV bring-up threw an unknown exception");
+        LOGE("APFPV connect threw an unknown exception");
         postState(ctx, ApfpvStation::State::FailNoAp);
     }
 
@@ -190,19 +185,7 @@ Java_com_openipc_wfbngrtl8812_ApfpvStaLink_nativeStaScan(
             LOGE("scan: libusb_wrap_sys_device failed (fd=%d)", fd); return;
         }
     }
-    if (!ctx->station) {
-        try {
-            ctx->driver = std::make_unique<WiFiDriver>(nullptr);
-            ctx->rtl = ctx->driver->CreateRtlDevice(ctx->handle);
-            if (!ctx->rtl) { LOGE("scan: CreateRtlDevice returned null"); return; }
-            StaCtx* c = ctx;
-            auto onState = [c](ApfpvStation::State s){ postState(c, s); };
-            auto onRtp   = [](const uint8_t*, size_t){};
-            ctx->station = std::make_unique<ApfpvStation>(
-                &ctx->rtl->adapter(), &ctx->rtl->radioManager(), onRtp, onState);
-            ctx->station->setDevice(ctx->rtl.get());
-        } catch (...) { LOGE("scan: device setup threw"); return; }
-    }
+    if (!ensureStation(ctx)) { LOGE("scan: ensureStation failed"); return; }
     jobject link = ctx->jlink;
     auto onAp = [ctx, link](const std::string& ssid, const ApInfo& info) {
         if (!ctx->jvm || !link) return;
