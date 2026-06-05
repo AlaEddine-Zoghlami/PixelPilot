@@ -1,8 +1,12 @@
 package com.openipc.pixelpilot;
 
+import android.app.PendingIntent;
 import android.content.Context;
+import android.content.Intent;
 import android.hardware.usb.UsbDevice;
+import android.hardware.usb.UsbDeviceConnection;
 import android.hardware.usb.UsbManager;
+import android.os.Build;
 import android.view.View;
 
 import com.openipc.pixelpilot.databinding.ActivityVideoBinding;
@@ -93,21 +97,79 @@ public class ApfpvLinkManager {
     }
 
     // --- mirrors WfbLinkManager.startAdapter, but credentialed + stateful ----
+    // Every external precondition here can fail at runtime (no device, permission
+    // not yet granted, the dongle still claimed by the WFB stack we just stopped,
+    // an uninitialised native handle). Each was previously unchecked and would
+    // crash the app when switching to APFPV dongle mode with a device connected —
+    // notably openDevice() returning null and being dereferenced for its fd.
     public synchronized boolean startAdapter(UsbDevice dev) {
+        if (dev == null) return false;
         UsbManager mgr = (UsbManager) context.getSystemService(Context.USB_SERVICE);
-        if (!mgr.hasPermission(dev)) return false;       // perm flow same as WFB path
+        if (mgr == null) { showMessage("APFPV: USB service unavailable"); return false; }
 
-        int fd = mgr.openDevice(dev).getFileDescriptor();
-        binding.tvMessage.setVisibility(View.VISIBLE);
-        binding.tvMessage.setText("APFPV: connecting to \"" + ssid + "\" ch" + wifiChannel);
+        // No permission yet: request it (mirrors the WFB path) and bail — the
+        // grant lets a subsequent switch/refresh succeed. Never open without it.
+        if (!mgr.hasPermission(dev)) {
+            requestPermission(mgr, dev);
+            showMessage("APFPV: allow USB access, then switch again");
+            return false;
+        }
+
+        // openDevice() returns null if the open races or the fd is still held by
+        // the stack we just tore down — must not deref it for getFileDescriptor().
+        UsbDeviceConnection conn = mgr.openDevice(dev);
+        if (conn == null) {
+            showMessage("APFPV: couldn't open dongle (busy?) — re-plug and retry");
+            return false;
+        }
+        int fd = conn.getFileDescriptor();
+        if (fd < 0) {
+            conn.close();
+            showMessage("APFPV: invalid dongle handle");
+            return false;
+        }
+
+        // The native station object must exist before we call into JNI, or the
+        // native side dereferences a null handle (SIGSEGV, not a Java exception).
+        if (staLink == null || staLink.handle() == 0L) {
+            conn.close();
+            showMessage("APFPV: station driver not initialised");
+            return false;
+        }
+
+        showMessage("APFPV: connecting to \"" + ssid + "\" ch" + wifiChannel);
+
+        // Breadcrumbs so a crash in the native chain below is pinpointed in the
+        // Crashlytics report (the JNI call can SIGSEGV — no Java stack otherwise).
+        Crash.key("link_mode", "APFPV");
+        Crash.key("apfpv_channel", String.valueOf(wifiChannel));
+        Crash.log(String.format("APFPV startAdapter: dongle %04X:%04X fd=%d -> nativeStaConnect",
+                                 dev.getVendorId(), dev.getProductId(), fd));
 
         // Runs the WHOLE gated native chain: ARM -> auth -> assoc -> WPA2 ->
         // DHCP -> RTP. State callbacks drive the UI; STREAMING => video on 5600.
-        ApfpvStaLink.nativeStaConnect(staLinkHandle(), staLink, fd,
+        ApfpvStaLink.nativeStaConnect(staLink.handle(), staLink, fd,
                                       wifiChannel, bandWidth, ssid, passphrase);
         // Turn on dongle-RSSI -> VTX:12345 feedback (better than stock phone-APFPV)
-        ApfpvStaLink.nativeStaSetLqFeedback(staLinkHandle(), true);
+        ApfpvStaLink.nativeStaSetLqFeedback(staLink.handle(), true);
         return true;
+    }
+
+    /** Ask the user for USB access to this dongle (same intent the WFB path uses). */
+    private void requestPermission(UsbManager mgr, UsbDevice dev) {
+        int flags = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+                ? PendingIntent.FLAG_MUTABLE : 0;
+        PendingIntent pi = PendingIntent.getBroadcast(
+                context, 0, new Intent(ACTION_USB_PERMISSION), flags);
+        mgr.requestPermission(dev, pi);
+    }
+
+    /** Post a status line to the shared message view from any thread. */
+    private void showMessage(String msg) {
+        binding.tvMessage.post(() -> {
+            binding.tvMessage.setVisibility(View.VISIBLE);
+            binding.tvMessage.setText(msg);
+        });
     }
 
     // --- map lifecycle/failures to user-visible messages ---------------------

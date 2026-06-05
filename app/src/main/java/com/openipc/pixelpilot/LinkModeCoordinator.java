@@ -72,6 +72,8 @@ public class LinkModeCoordinator {
      * @param pass     APFPV password (ignored for WFB)
      */
     public synchronized void switchTo(Mode target, String ssid, String pass, ModeChangeListener cb) {
+        Crash.log("LinkMode switchTo " + target + " from " + current);
+        Crash.key("link_mode", target.name());
         if (target == current) { if (cb != null) cb.onModeChanged(current, true, "already in mode"); return; }
 
         // 1. STOP the active stack. Dongle modes release the libusb fd; the

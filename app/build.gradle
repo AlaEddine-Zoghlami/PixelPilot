@@ -1,5 +1,7 @@
 plugins {
     alias(libs.plugins.androidApplication)
+    alias(libs.plugins.googleServices)
+    alias(libs.plugins.firebaseCrashlytics)
 }
 
 android {
@@ -29,6 +31,13 @@ android {
             shrinkResources = true
             signingConfig = signingConfigs.release
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'),'proguard-rules.pro'
+            // Crashlytics symbolication for the real Firebase project
+            // (pixelpilot-f9e5c): upload the R8 mapping for readable Java
+            // stack traces and the NDK symbols for native devourer/APFPV crashes.
+            firebaseCrashlytics {
+                mappingFileUploadEnabled true
+                nativeSymbolUploadEnabled true
+            }
         }
     }
 
@@ -54,4 +63,10 @@ dependencies {
     implementation(libs.appcompat)
     implementation(libs.material)
     implementation(libs.philjay.mpandroidchart)
+
+    // Firebase Crashlytics — Java + native (NDK) crash reporting.
+    implementation(platform(libs.firebase.bom))
+    implementation(libs.firebase.crashlytics)
+    implementation(libs.firebase.crashlytics.ndk)
+    implementation(libs.firebase.analytics)
 }

@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "973037284055",
+    "project_id": "pixelpilot-f9e5c",
+    "storage_bucket": "pixelpilot-f9e5c.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:973037284055:android:0d80b7152b083704799e92",
+        "android_client_info": {
+          "package_name": "com.openipc.pixelpilot"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCb2aGHCMB3DOKuiyhs9VjDAGKJYvonELo"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

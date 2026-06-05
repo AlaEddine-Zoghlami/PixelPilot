@@ -5,3 +5,8 @@
 -keepclasseswithmembernames class * {
     native <methods>;
 }
+
+# Crashlytics: keep file/line info so release crash reports are symbolicated,
+# and don't strip custom exception types.
+-keepattributes SourceFile,LineNumberTable
+-keep public class * extends java.lang.Exception
