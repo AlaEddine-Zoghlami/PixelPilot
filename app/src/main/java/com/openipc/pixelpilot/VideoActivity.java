@@ -118,6 +118,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
     private com.openipc.pixelpilot.apfpv.ApfpvWifiManager apfpvWifiManager;
     private LinkModeCoordinator.Mode linkMode = LinkModeCoordinator.Mode.WFB;
     private boolean apfpvMode = false;   // true for EITHER apfpv mode (dongle or phone-wifi); see linkMode for which
+    private volatile String lastWifiStatus = "idle";   // last APFPV phone-Wi-Fi status line
     private LinkModeCoordinator linkModeCoordinator;
 
     private static final String PREF_DRONE_USERNAME = "drone_username";
@@ -323,10 +324,10 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         apfpvLinkManager = new ApfpvLinkManager(this, binding, apfpvLink);
         apfpvWifiManager = new com.openipc.pixelpilot.apfpv.ApfpvWifiManager(this,
             new com.openipc.pixelpilot.apfpv.ApfpvWifiManager.Listener() {
-                @Override public void onState(String s) { runOnUiThread(() ->
+                @Override public void onState(String s) { lastWifiStatus = s; runOnUiThread(() ->
                     Toast.makeText(VideoActivity.this, "APFPV Wi-Fi: " + s, Toast.LENGTH_SHORT).show()); }
                 @Override public void onRssi(int dbm)   { /* OSD hook: WifiManager RSSI */ }
-                @Override public void onError(String d) { runOnUiThread(() ->
+                @Override public void onError(String d) { lastWifiStatus = d; runOnUiThread(() ->
                     Toast.makeText(VideoActivity.this, "APFPV Wi-Fi: " + d, Toast.LENGTH_LONG).show()); }
             });
         String savedMode = getSharedPreferences("pixelpilot", MODE_PRIVATE)
@@ -1026,8 +1027,13 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         m.add("SSID / Password...").setOnMenuItemClickListener(i -> { showApfpvCredsDialog(); return true; });
         m.add("Reconnect").setOnMenuItemClickListener(i -> {
             if (apfpvLinkManager != null) apfpvLinkManager.refreshAdapters(); return true; });
+        // Mode-aware status: dongle has the full funnel (adapter -> connecting ->
+        // connected -> APFPV found/not-found); phone-Wi-Fi only the last stages.
+        String apfpvStatus = (linkMode == LinkModeCoordinator.Mode.APFPV_WIFI)
+                ? "Wi-Fi: " + lastWifiStatus
+                : (apfpvLinkManager != null ? apfpvLinkManager.statusLine() : "—");
+        m.add("Status: " + apfpvStatus).setEnabled(false);
         m.add("RSSI: " + (apfpvLink != null ? apfpvLink.getRssi() : -99) + " dBm").setEnabled(false);
-        m.add("State: " + (apfpvLink != null ? apfpvLink.getState() : 0)).setEnabled(false);
         if (apfpvLinkManager != null) {
             com.openipc.pixelpilot.apfpv.WlxAdapters wlx = apfpvLinkManager.adapters();
             if (wlx.count() > 1)

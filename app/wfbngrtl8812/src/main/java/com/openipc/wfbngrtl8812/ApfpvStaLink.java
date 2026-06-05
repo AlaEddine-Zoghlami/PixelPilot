@@ -143,6 +143,12 @@ public class ApfpvStaLink {
         currentFd = -1;
     }
     public int getState() { return nativeStaGetState(nativeStaLink); }
+    /** Current lifecycle state as the enum (bounds-checked against native drift). */
+    public StaState stateEnum() {
+        int o = nativeStaGetState(nativeStaLink);
+        StaState[] v = StaState.values();
+        return (o >= 0 && o < v.length) ? v[o] : StaState.IDLE;
+    }
     public int getRssi()  { return nativeStaGetRssi(nativeStaLink); }
     /** Instance wrapper: set GS dongle TX power index (0-63) in station mode. */
     public void setTxPower(int power) { nativeStaSetTxPower(nativeStaLink, power); }

@@ -220,26 +220,50 @@ public class ApfpvLinkManager {
     }
 
     // --- map lifecycle/failures to user-visible messages ---------------------
-    private void showState(StaState s) {
-        final String msg;
+    // Framed as the user-facing dongle flow: adapter -> connecting to SSID ->
+    // connected to SSID -> APFPV found (streaming) / not found.
+    private String labelFor(StaState s) {
         switch (s) {
-            case SCANNING:       msg = "APFPV: scanning for " + ssid + "…"; break;
-            case ARMING:         msg = "APFPV: arming station mode…"; break;
-            case AUTHENTICATING: msg = "APFPV: authenticating…"; break;
-            case ASSOCIATING:    msg = "APFPV: associating…"; break;
-            case HANDSHAKING:    msg = "APFPV: WPA2 handshake…"; break;
-            case DHCP:           msg = "APFPV: getting IP…"; break;
-            case STREAMING:      msg = ""; break;                  // hide; video is up
-            case FAIL_NO_AP:     msg = "APFPV: AP not found — check channel/range"; break;
-            case FAIL_TX:        msg = "APFPV: adapter TX problem (descriptor)"; break;
-            case FAIL_NO_ACK:    msg = "APFPV: adapter can't ACK in station mode "
-                                       + "(use WFB-ng instead)"; break;
-            case FAIL_AUTH:      msg = "APFPV: wrong password / handshake failed"; break;
-            case FAIL_DHCP:      msg = "APFPV: associated but no IP"; break;
-            case LINK_LOST:      msg = "APFPV: link lost"; break;
-            case RECONNECTING:   msg = "APFPV: reconnecting…"; break;
-            default:             msg = ""; break;
+            case SCANNING:       return "Searching for \"" + ssid + "\"…";
+            case ARMING:         return "Connecting to \"" + ssid + "\"…";
+            case AUTHENTICATING:
+            case ASSOCIATING:
+            case HANDSHAKING:    return "Connecting to \"" + ssid + "\"…";
+            case DHCP:           return "Connected to \"" + ssid + "\" — getting IP…";
+            case STREAMING:      return "APFPV connected — video on \"" + ssid + "\"";
+            case FAIL_NO_AP:     return "\"" + ssid + "\" not found — check channel/range";
+            case FAIL_TX:        return "Adapter TX problem (descriptor)";
+            case FAIL_NO_ACK:    return "Adapter can't ACK in station mode (use WFB-ng)";
+            case FAIL_AUTH:      return "Wrong password / handshake failed";
+            case FAIL_DHCP:      return "Connected to \"" + ssid + "\" — APFPV not found (no IP)";
+            case LINK_LOST:      return "Link lost";
+            case RECONNECTING:   return "Reconnecting…";
+            case IDLE:           return hasDongle() ? "Adapter connected — ready" : "No adapter";
+            default:             return "";
         }
+    }
+
+    /** Concise current APFPV status line for the menu / OSD. */
+    public String statusLine() {
+        if (!hasDongle()) return "No adapter";
+        StaState s = (staLink != null) ? staLink.stateEnum() : StaState.IDLE;
+        String l = labelFor(s);
+        return l.isEmpty() ? "Adapter connected" : l;
+    }
+
+    /** True if an RTL8812AU dongle is currently attached. */
+    public boolean hasDongle() {
+        UsbManager mgr = (UsbManager) context.getSystemService(Context.USB_SERVICE);
+        if (mgr == null) return false;
+        for (UsbDevice d : mgr.getDeviceList().values())
+            if (d.getVendorId() == 0x0bda) return true;
+        return false;
+    }
+
+    private void showState(StaState s) {
+        // Streaming hides the banner (video is up); everything else shows the label.
+        final String label = labelFor(s);
+        final String msg = (s == StaState.STREAMING) ? "" : (label.isEmpty() ? "" : "APFPV: " + label);
         binding.tvMessage.post(() -> {
             binding.tvMessage.setVisibility(msg.isEmpty() ? View.GONE : View.VISIBLE);
             binding.tvMessage.setText(msg);

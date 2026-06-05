@@ -116,8 +116,13 @@ public class ApfpvWifiManager {
                 boundNetwork = network;
                 // Pin ALL sockets in this process (video UDP + SSH TCP) to Wi-Fi.
                 boolean ok = cm.bindProcessToNetwork(network);
-                emitState(ok ? "associated + bound to " + ssid
-                             : "associated but bind FAILED (sockets may use cellular)");
+                emitState("Connected to " + ssid + (ok ? "" : " (bind failed)"));
+                // Phone-Wi-Fi APFPV has only the last two states: once associated,
+                // check whether THIS AP is an APFPV air unit. APFPV hands out
+                // 192.168.0.x with the VTX gateway at 192.168.0.1 — inspect routes.
+                emitState(looksLikeApfpv(network)
+                        ? "APFPV found on " + ssid + " (VTX 192.168.0.1)"
+                        : "Connected to " + ssid + " — APFPV not found");
                 startRssiLoop();
                 startLqLoop();
             }
@@ -147,6 +152,25 @@ public class ApfpvWifiManager {
         }
         boundNetwork = null;
         emitState("stopped");
+    }
+
+    /** Heuristic: is the associated AP an APFPV air unit? APFPV assigns the phone
+     *  192.168.0.x and the VTX is the 192.168.0.1 gateway — detect that subnet. */
+    private boolean looksLikeApfpv(Network net) {
+        try {
+            android.net.LinkProperties lp = cm.getLinkProperties(net);
+            if (lp == null) return false;
+            for (android.net.LinkAddress la : lp.getLinkAddresses()) {
+                java.net.InetAddress a = la.getAddress();
+                if (a != null && a.getHostAddress() != null
+                        && a.getHostAddress().startsWith("192.168.0.")) return true;
+            }
+            for (android.net.RouteInfo r : lp.getRoutes()) {
+                java.net.InetAddress g = r.getGateway();
+                if (g != null && "192.168.0.1".equals(g.getHostAddress())) return true;
+            }
+        } catch (Exception ignored) {}
+        return false;
     }
 
     /** Current Wi-Fi RSSI in dBm, or -127 if unavailable. */
