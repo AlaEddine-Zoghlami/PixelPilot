@@ -54,8 +54,8 @@ add_library(devourer STATIC
         ${CMAKE_SOURCE_DIR}/devourer/src/ParsedRadioPacket.cpp
         ${CMAKE_SOURCE_DIR}/devourer/src/RadioManagementModule.cpp
         ${CMAKE_SOURCE_DIR}/devourer/src/RadioManagementModule.h
-        ${CMAKE_SOURCE_DIR}/devourer/src/Rtl8812aDevice.cpp
-        ${CMAKE_SOURCE_DIR}/devourer/src/Rtl8812aDevice.h
+        ${CMAKE_SOURCE_DIR}/devourer/src/RtlJaguarDevice.cpp
+        ${CMAKE_SOURCE_DIR}/devourer/src/RtlJaguarDevice.h
         ${CMAKE_SOURCE_DIR}/devourer/src/RtlUsbAdapter.cpp
         ${CMAKE_SOURCE_DIR}/devourer/src/RtlUsbAdapter.h
         ${CMAKE_SOURCE_DIR}/devourer/src/SelectedChannel.h

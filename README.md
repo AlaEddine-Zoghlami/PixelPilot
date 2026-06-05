@@ -1,47 +1,131 @@
-# PixelPilot
+# PixelPilot — APFPV fork
+
 > [!IMPORTANT]
-> Warning, performance will heavily depend on your device's processing power.
+> This is the **APFPV** fork of [OpenIPC/PixelPilot](https://github.com/OpenIPC/PixelPilot).
+> In addition to the stock wfb-ng ground-station, it adds a **direct air↔phone
+> link** ("APFPV") that drives an RTL8812AU USB adapter in **station mode** from
+> userspace — no kernel MLME, no root — via the forked devourer driver.
 >
-> Use this app at your own risk.
+> Performance depends heavily on your device's processing power. Use at your own risk.
 
 ## Introduction
+
 ```
-PixelPilot – the Android FPV app that leaves “loading…” screens in the dust.
-Plug in, fly live with sub‑atomic latency, flex real‑time signal stats, and marvel at the open‑source unicorn
+PixelPilot – the Android FPV app that leaves "loading…" screens in the dust.
+Plug in, fly live with sub-atomic latency, flex real-time signal stats, and marvel at the open-source unicorn
 where (brace yourself) most things actually work.
 ```
 
+Built on the work of:
+
 - [FPVue_android](https://github.com/gehee/FPVue_android): basic and unique work to combine all components into a single application by [Gee He](https://github.com/gehee).
-- [devourer](https://github.com/openipc/devourer): userspace rtl8812au driver initially created by [buldo](https://github.com/buldo) and converted to C by [josephnef](https://github.com/josephnef).
+- [devourer](https://github.com/AlaEddine-Zoghlami/Devourer) (**APFPV fork**): userspace RTL8812AU driver, originally created by [buldo](https://github.com/buldo), converted to C by [josephnef](https://github.com/josephnef), and based on [openipc/devourer](https://github.com/openipc/devourer). The fork adds the APFPV station-mode stack (WPA2 supplicant, scan/probe, 802.11 framing, DHCP, link-quality feedback).
 - [LiveVideo10ms](https://github.com/Consti10/LiveVideo10ms): excellent video decoder from [Consti10](https://github.com/Consti10) converted into a module.
 - [wfb-ng](https://github.com/svpcom/wfb-ng): library allowing the broadcast of the video feed over the air.
 
-The wfb-ng [gs.key](https://github.com/OpenIPC/PixelPilot/raw/main/app/src/main/assets/gs.key) is embedded in the app.
-The settings menu allows selecting a different key from your phone.
+The wfb-ng [gs.key](https://github.com/OpenIPC/PixelPilot/raw/main/app/src/main/assets/gs.key) is embedded in the app. The settings menu allows selecting a different key from your phone.
 
-Supported rtl8812au wifi adapter are listed [here](https://github.com/OpenIPC/PixelPilot/blob/master/app/src/main/res/xml/usb_device_filter.xml).
-Feel free to send pull requests to add new supported wifi adapters hardware IDs.
+Supported RTL8812AU adapters are listed [here](app/src/main/res/xml/usb_device_filter.xml). Feel free to send pull requests to add new supported adapter hardware IDs.
 
-Now support saving a dvr of the video feed to `Files/Internal Storage/Movies/`
+Supports saving a DVR of the video feed to `Files/Internal Storage/Movies/`.
+
+## APFPV integration (what this fork adds)
+
+APFPV gives the phone a **direct WPA2 station link to an air unit** over an
+RTL8812AU dongle, alongside (or instead of) the classic wfb-ng broadcast path.
+The driver work lives in the [Devourer fork](https://github.com/AlaEddine-Zoghlami/Devourer);
+the Android glue lives here:
+
+| Layer | Location |
+|-------|----------|
+| Native station driver (station mode, WPA2, scan/probe, DHCP, RX deframe) | `app/wfbngrtl8812/src/main/cpp/devourer/` (devourer submodule) |
+| JNI bridge + `ApfpvStaLink` Java API | `app/wfbngrtl8812/src/main/cpp/apfpv_jni.cpp`, `app/wfbngrtl8812/src/main/java/com/openipc/wfbngrtl8812/ApfpvStaLink.java` |
+| Link orchestration / mode coordination | `app/src/main/java/com/openipc/pixelpilot/ApfpvLinkManager.java` |
+| Air-unit control (SSH + REST), presets, camera settings | `app/src/main/java/com/openipc/pixelpilot/apfpv/` (`AirSshClient`, `AirCameraSettings`, `AirPresets`, `ApfpvWifiManager`, `GsMenuWfbng`, `GsSettings`, `WlxAdapters`, `ApfpvSettings`) |
+
+The link can fall back to the standard wfb-ng broadcast pipeline; the two modes
+are coordinated by `ApfpvLinkManager` / `LinkModeCoordinator`.
 
 ## Compatibility
-- arm64-v8a, armeabi-v7a android devices (including Meta Quest 2/3, non vr mode)
+
+- arm64-v8a, armeabi-v7a Android devices (including Meta Quest 2/3, non-VR mode)
 
 ## Build
-```
-git clone https://github.com/OpenIPC/PixelPilot.git
+
+### 1. Clone with submodules
+
+This repo uses two git submodules — the devourer fork and wfb-ng:
+
+```sh
+git clone --recurse-submodules https://github.com/AlaEddine-Zoghlami/PixelPilot.git
 cd PixelPilot
-git submodule init
-git submodule update
+# or, if you already cloned without --recurse-submodules:
+git submodule update --init --recursive
 ```
 
-The project can then be opened in android studio and built from there.
+`.gitmodules` pins `app/wfbngrtl8812/src/main/cpp/devourer` to the
+[Devourer fork](https://github.com/AlaEddine-Zoghlami/Devourer) (`master`) and
+`app/wfbngrtl8812/src/main/cpp/wfb-ng` to [svpcom/wfb-ng](https://github.com/svpcom/wfb-ng) (`master`).
+
+### 2. Toolchain
+
+Open in **Android Studio** (recommended) or build from the CLI. Either way you need:
+
+| Component | Version |
+|-----------|---------|
+| JDK | 17+ (21 works) |
+| Android SDK platform | `android-34` (`compileSdk = 34`) |
+| Build-tools | `34.0.0` (Gradle auto-installs `35.0.0`) |
+| NDK | `26.1.10909125` |
+| CMake | `3.22.1` |
+
+Android Studio installs these for you via the SDK Manager. For a headless build,
+install them with `sdkmanager`:
+
+```sh
+sdkmanager "platforms;android-34" "ndk;26.1.10909125" "cmake;3.22.1"
+```
+
+Create `local.properties` pointing at your SDK. **On Windows use forward slashes**
+(a Java `.properties` file treats `\` as an escape, so `C:\Android\sdk` is parsed
+incorrectly and breaks NDK discovery):
+
+```properties
+sdk.dir=C:/Android/sdk
+```
+
+### 3. Prebuilt native libraries (required)
+
+The native modules link against vendored prebuilt `.so` files, one set per ABI:
+
+- `app/wfbngrtl8812/src/main/cpp/libs/<abi>/` → `libusb1.0.so`, `libsodium.so`, `libpcap.a`
+- `app/videonative/src/main/cpp/libs/<abi>/` → `libopus.so`
+
+> [!WARNING]
+> Not all of these prebuilt binaries are checked into this tree — `libusb1.0.so`
+> (unversioned), `libsodium.so` and `libopus.so` may be missing for one or both
+> ABIs, and the native build fails at link with
+> `ninja: error: '…/libXXX.so' … missing and no known rule to make it`.
+> Copy the matching prebuilt libraries for `arm64-v8a` and `armeabi-v7a` from the
+> upstream [OpenIPC/PixelPilot](https://github.com/OpenIPC/PixelPilot) tree (same
+> `libs/<abi>/` paths) before building.
+
+### 4. Assemble
+
+```sh
+./gradlew :app:assembleDebug        # Linux/macOS
+.\gradlew.bat :app:assembleDebug    # Windows
+```
+
+The APK is written to `app/build/outputs/apk/debug/`.
 
 ## Installation
-- Download and install PixelPilot.apk from https://github.com/OpenIPC/PixelPilot/releases
-- Audio feature: Now PixelPilot app had ability to play opus stream from majestic on camera. In order to enable this feature, pls enable on camera side:
-+ Audio settings in (/etc/majestic.yaml):
-```
+
+- Build the APK (above) and install it with `adb install app/build/outputs/apk/debug/app-debug.apk`.
+- Audio feature: PixelPilot can play an Opus stream from majestic on the camera.
+  Enable it camera-side in `/etc/majestic.yaml`:
+
+```yaml
 audio:
   enabled: true
   volume: 30
@@ -62,9 +146,8 @@ audio:
 | 4 | **1.66667** | 67 % |
 | 5 | **2.00000** | 100 % |
 
-> **How the denominator is used:**  
+> **How the denominator is used:**
 > The selected denominator multiplies either **`FEC_k`** (source-packet count) *or* **`FEC_n`** (total packets after redundancy), increasing the actual amount of forward-error-correction data.
-
 
 ### Threshold Fields (packets / second)
 
@@ -73,10 +156,8 @@ audio:
 | `LostThreshold` | If `lost_pkts ≥ LostThreshold`, jump straight to **FEC-5** |
 | `RecThr1 … RecThr4` | Number of *recovered* packets (`rec_pkts`) that triggers **FEC-1 … FEC-4** |
 
-**Ordering constraint — must hold:**  
+**Ordering constraint — must hold:**
 `RecThr1 < RecThr2 < RecThr3 < RecThr4 < LostThreshold`
-
----
 
 ### Decision Logic (executed once per second)
 
@@ -94,29 +175,29 @@ elif rec_pkts >= RecThr1:
 else:
     level = 0
 
-apply_fec(level)  # multiply the level’s denominator by FEC_k or FEC_n
+apply_fec(level)  # multiply the level's denominator by FEC_k or FEC_n
 ```
 
 Set thresholds thoughtfully:
 Lower values → more aggressive protection (higher bandwidth / latency).
 Higher values → leaner bandwidth, less resilience.
 
----
+## List of potential improvements
 
-## List of potential improvements:
  * adaptive link [x]
  * 40 MHz bandwidth [?] - works but buggy
  * support stream over ipv6
  * Save audio stream with the video for recordings
  * Possibility to forward undecoded wfb stream over the network
 
-## Known issues:
+## Known issues
+
  * Audio stream is not working
 
 ## Tested devices based on real user reviews
 
 * Samsung Galaxy A54 (Exynos 1380 processor)
 * Google Pixel 7 Pro
-* Poco x6 Pro
+* Poco X6 Pro
 * Meta Quest 2
 * Meta Quest 3
