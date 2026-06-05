@@ -6,8 +6,10 @@ package com.openipc.pixelpilot.apfpv;
  * The legal limiter is EIRP (radiated), not conducted power:
  *     EIRP(dBm) = conducted_power(dBm) + antenna_gain(dBi)
  * so to stay at a legal EIRP cap with a higher-gain antenna we must LOWER the
- * conducted power by the gain. The user configures the antenna gain (default 6 dB,
- * their VTX antenna) and we derive the conducted target per mode:
+ * conducted power by the gain. The configured gain is that of the antenna the GS
+ * DONGLE TRANSMITS on (worst case). The EMAX Wyvern Link VRX kit ships an LHCP
+ * omni (~2 dBi) + a patch (~6-8 dBi); use the patch -> default 6 dB. We derive the
+ * conducted target per mode:
  *
  *   APFPV  5.2 GHz UNII-1 : 200 mW EIRP = 23.0 dBm   -> conducted = 23.0 - gain
  *   WFB    5.8 GHz        :  25 mW EIRP = 14.0 dBm   -> conducted = 14.0 - gain

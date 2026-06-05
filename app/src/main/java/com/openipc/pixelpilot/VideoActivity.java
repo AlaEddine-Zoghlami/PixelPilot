@@ -1322,7 +1322,9 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         in.setHint("Antenna gain (dBi)");
         new android.app.AlertDialog.Builder(this)
             .setTitle("Antenna gain (dBi)")
-            .setMessage("Your VTX antenna gain. EIRP = conducted + gain; 'Apply DE legal limits' lowers the dongle TX power by this to hold the legal cap.")
+            .setMessage("Gain of the antenna the GS dongle TRANSMITS on (worst case for EIRP). "
+                + "EMAX Wyvern Link VRX kit: LHCP omni ≈2 dBi or patch ≈6–8 dBi — use the patch. "
+                + "EIRP = conducted + gain; 'DE legal' lowers dongle TX power by this to hold the cap.")
             .setView(in)
             .setPositiveButton("Save", (d, w2) -> {
                 float g;
