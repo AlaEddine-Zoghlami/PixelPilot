@@ -32,6 +32,22 @@ android {
         }
     }
 
+    // libVideoNative.so DT_NEEDEDs the vendored prebuilt libopus.so. AGP's
+    // auto-bundling of CMake-linked prebuilts is unreliable across variants (it
+    // landed in release but NOT debug, so the debug app crashed with
+    // "libopus.so not found"). Declare the prebuilt libs dir as a jniLibs source
+    // so EVERY variant packages it; pickFirst avoids a clash if AGP also bundles it.
+    sourceSets {
+        main {
+            jniLibs.srcDirs += ["src/main/cpp/libs"]
+        }
+    }
+    packaging {
+        jniLibs {
+            pickFirsts += ["**/libopus.so"]
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
