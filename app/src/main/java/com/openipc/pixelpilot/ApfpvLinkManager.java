@@ -160,12 +160,20 @@ public class ApfpvLinkManager {
         Telemetry.setMode("APFPV");
         Telemetry.event("apfpv_native_connect", "vidpid", vidpid, "fd", String.valueOf(fd));
 
-        // Runs the WHOLE gated native chain: ARM -> auth -> assoc -> WPA2 ->
-        // DHCP -> RTP. State callbacks drive the UI; STREAMING => video on 5600.
-        ApfpvStaLink.nativeStaConnect(staLink.handle(), staLink, fd,
-                                      wifiChannel, bandWidth, ssid, passphrase);
-        // Turn on dongle-RSSI -> VTX:12345 feedback (better than stock phone-APFPV)
-        ApfpvStaLink.nativeStaSetLqFeedback(staLink.handle(), true);
+        // nativeStaConnect runs the WHOLE gated chain (ARM -> auth -> assoc ->
+        // WPA2 -> DHCP -> RTP) and BLOCKS until it reaches STREAMING or fails.
+        // It MUST run off the UI thread — running it inline froze the main thread
+        // and Android killed the app with an ANR. Drive it on a worker; progress
+        // arrives via the state callbacks (which post back to the UI thread).
+        final long handle = staLink.handle();
+        final int fdF = fd, chF = wifiChannel, bwF = bandWidth;
+        final String ssidF = ssid, passF = passphrase;
+        new Thread(() -> {
+            // State callbacks drive the UI; STREAMING => video on 5600.
+            ApfpvStaLink.nativeStaConnect(handle, staLink, fdF, chF, bwF, ssidF, passF);
+            // Turn on dongle-RSSI -> VTX:12345 feedback (better than stock phone-APFPV)
+            ApfpvStaLink.nativeStaSetLqFeedback(handle, true);
+        }, "apfpv-connect").start();
         return true;
     }
 
@@ -204,6 +212,7 @@ public class ApfpvLinkManager {
             case FAIL_AUTH:      msg = "APFPV: wrong password / handshake failed"; break;
             case FAIL_DHCP:      msg = "APFPV: associated but no IP"; break;
             case LINK_LOST:      msg = "APFPV: link lost"; break;
+            case RECONNECTING:   msg = "APFPV: reconnecting…"; break;
             default:             msg = ""; break;
         }
         binding.tvMessage.post(() -> {

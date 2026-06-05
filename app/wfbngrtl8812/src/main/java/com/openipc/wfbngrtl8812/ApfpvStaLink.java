@@ -50,7 +50,10 @@ public class ApfpvStaLink {
         FAIL_NO_ACK,       // NOGO_Deauthed             (hardware won't auto-ACK)
         FAIL_AUTH,         // wrong passphrase / 4-way failed
         FAIL_DHCP,         // associated but no IP
-        LINK_LOST          // mid-flight deauth/disassoc
+        LINK_LOST,         // mid-flight deauth/disassoc
+        RECONNECTING       // supervisor re-establishing the link
+        // NOTE: this list MUST stay in the SAME ORDER as the native
+        // ApfpvStation::State enum — ordinals are passed across JNI by index.
     }
 
     public interface StaStatusListener {
@@ -121,7 +124,11 @@ public class ApfpvStaLink {
     // called FROM native on state/rssi changes
     @SuppressWarnings("unused")
     private void onNativeState(int ordinal) {
-        if (listener != null) listener.onStateChanged(StaState.values()[ordinal]);
+        // Defensive: a native state the Java enum doesn't know (enum drift) must
+        // not crash the app with ArrayIndexOutOfBounds — ignore unknown ordinals.
+        StaState[] states = StaState.values();
+        if (ordinal < 0 || ordinal >= states.length) return;
+        if (listener != null) listener.onStateChanged(states[ordinal]);
     }
     @SuppressWarnings("unused")
     private void onNativeRssi(int dbm) {

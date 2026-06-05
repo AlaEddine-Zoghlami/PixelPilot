@@ -20,6 +20,7 @@
 
     <application
         android:name=".PixelPilotApp"
+        android:gwpAsanMode="always"
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
