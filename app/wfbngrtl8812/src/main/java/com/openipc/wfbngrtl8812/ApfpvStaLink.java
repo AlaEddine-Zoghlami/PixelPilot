@@ -90,6 +90,15 @@ public class ApfpvStaLink {
     // on the same worker thread via onNativeScanResult.
     public static native void nativeStaScan(long inst, ApfpvStaLink link, int fd, int perChannelMs, boolean includeDfs);
 
+    // VRX EIRP-calibration beacon: dongle broadcasts `ssid` on `channel` at the
+    // 0-63 `txIndex` so a second phone can scan + measure its EIRP. Non-blocking.
+    public static native void nativeStaStartBeaconCal(long inst, int fd, String ssid, int channel, int txIndex);
+    public static native void nativeStaStopBeaconCal(long inst);
+    public void startBeaconCal(int fd, String ssid, int channel, int txIndex) {
+        nativeStaStartBeaconCal(nativeStaLink, fd, ssid, channel, txIndex);
+    }
+    public void stopBeaconCal() { nativeStaStopBeaconCal(nativeStaLink); }
+
     // Poll/observe the lifecycle (delivered via registered callback below).
     public static native int  nativeStaGetState(long inst);   // -> StaState ordinal
     public static native int  nativeStaGetRssi(long inst);    // dongle dBm

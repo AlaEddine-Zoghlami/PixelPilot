@@ -225,6 +225,32 @@ Java_com_openipc_wfbngrtl8812_ApfpvStaLink_nativeStaScan(
     catch (...) { LOGE("scanAll threw"); }
 }
 
+// VRX EIRP-cal beacon: make the dongle broadcast `ssid` on `channel` at `txIndex`
+// so a second phone can scan + measure its EIRP. Adopts the fd + builds the
+// device if needed (same as scan). Non-blocking — beacons on a native thread.
+JNIEXPORT void JNICALL
+Java_com_openipc_wfbngrtl8812_ApfpvStaLink_nativeStaStartBeaconCal(
+        JNIEnv* env, jclass, jlong inst, jint fd, jstring jssid, jint channel, jint txIndex) {
+    auto* ctx = reinterpret_cast<StaCtx*>(inst);
+    if (!ctx || !ctx->usb) return;
+    if (!ctx->handle) {
+        if (libusb_wrap_sys_device(ctx->usb, (intptr_t)fd, &ctx->handle) < 0 || !ctx->handle) {
+            LOGE("beacon: libusb_wrap_sys_device failed (fd=%d)", fd); return;
+        }
+    }
+    if (!ensureStation(ctx)) { LOGE("beacon: ensureStation failed"); return; }
+    const char* ssid = env->GetStringUTFChars(jssid, nullptr);
+    try { ctx->station->startBeaconCal(ssid ? ssid : "APFPV-VRX-CAL", channel, txIndex); }
+    catch (...) { LOGE("startBeaconCal threw"); }
+    if (ssid) env->ReleaseStringUTFChars(jssid, ssid);
+}
+
+JNIEXPORT void JNICALL
+Java_com_openipc_wfbngrtl8812_ApfpvStaLink_nativeStaStopBeaconCal(JNIEnv*, jclass, jlong inst) {
+    auto* ctx = reinterpret_cast<StaCtx*>(inst);
+    if (ctx && ctx->station) ctx->station->stopBeaconCal();
+}
+
 JNIEXPORT jint JNICALL
 Java_com_openipc_wfbngrtl8812_ApfpvStaLink_nativeStaGetState(JNIEnv*, jclass, jlong inst) {
     auto* ctx = reinterpret_cast<StaCtx*>(inst);

@@ -128,6 +128,36 @@ public class ApfpvLinkManager {
         return true;
     }
 
+    /** VRX EIRP-calibration: make the dongle broadcast a hardcoded SSID so a
+     *  SECOND phone (no dongle) can scan + measure this dongle's EIRP at a known
+     *  distance. Opens the dongle like scanSsids(); beacons until stopBeaconCal(). */
+    public synchronized boolean startBeaconCal(String ssid, int channel, int txIndex) {
+        UsbManager mgr = (UsbManager) context.getSystemService(Context.USB_SERVICE);
+        if (mgr == null || staLink == null || staLink.handle() == 0L) return false;
+        UsbDevice dev = null;
+        for (UsbDevice d : mgr.getDeviceList().values())
+            if (d.getVendorId() == 0x0bda) { dev = d; break; }
+        if (dev == null) { showMessage("VRX beacon: no dongle"); return false; }
+        if (!mgr.hasPermission(dev)) {
+            requestPermission(mgr, dev);
+            showMessage("VRX beacon: allow USB access, then retry");
+            return false;
+        }
+        UsbDeviceConnection conn = mgr.openDevice(dev);
+        if (conn == null) { showMessage("VRX beacon: couldn't open dongle"); return false; }
+        int fd = conn.getFileDescriptor();
+        if (fd < 0) { conn.close(); return false; }
+        Telemetry.event("apfpv_beacon_cal", "ch", String.valueOf(channel), "idx", String.valueOf(txIndex));
+        staLink.startBeaconCal(fd, ssid, channel, txIndex);
+        showMessage("VRX beacon ON: \"" + ssid + "\" ch" + channel + " (TX idx " + txIndex + ")");
+        return true;
+    }
+
+    public synchronized void stopBeaconCal() {
+        if (staLink != null) staLink.stopBeaconCal();
+        showMessage("VRX beacon OFF");
+    }
+
     // --- mirrors WfbLinkManager.startAdapter, but credentialed + stateful ----
     // Every external precondition here can fail at runtime (no device, permission
     // not yet granted, the dongle still claimed by the WFB stack we just stopped,

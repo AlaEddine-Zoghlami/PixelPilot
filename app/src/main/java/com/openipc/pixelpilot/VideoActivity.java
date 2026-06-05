@@ -119,6 +119,8 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
     private LinkModeCoordinator.Mode linkMode = LinkModeCoordinator.Mode.WFB;
     private boolean apfpvMode = false;   // true for EITHER apfpv mode (dongle or phone-wifi); see linkMode for which
     private volatile String lastWifiStatus = "idle";   // last APFPV phone-Wi-Fi status line
+    private boolean vrxBeaconOn = false;                // VRX EIRP-cal beacon (master phone)
+    static final String VRX_CAL_SSID = "APFPV-VRX-CAL"; // hardcoded SSID for the 2-phone EIRP rig
     private LinkModeCoordinator linkModeCoordinator;
 
     private static final String PREF_DRONE_USERNAME = "drone_username";
@@ -1085,6 +1087,24 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
             return true;
         });
         m.add("EIRP estimate…").setOnMenuItemClickListener(i -> { showEirpEstimatorDialog(); return true; });
+        // Master phone (with dongle): broadcast a hardcoded SSID so a SECOND phone
+        // (no dongle, ~2 m away) can EIRP-estimate this dongle's output.
+        m.add(vrxBeaconOn ? "VRX beacon (cal): ON — tap to stop" : "VRX beacon (cal): start")
+            .setOnMenuItemClickListener(i -> {
+                if (apfpvLinkManager == null) return true;
+                if (vrxBeaconOn) {
+                    apfpvLinkManager.stopBeaconCal(); vrxBeaconOn = false;
+                    Toast.makeText(this, "VRX beacon stopped", Toast.LENGTH_SHORT).show();
+                } else {
+                    int ch  = getSharedPreferences("pixelpilot", MODE_PRIVATE).getInt("apfpv_channel", 40);
+                    int idx = getSharedPreferences("general", MODE_PRIVATE).getInt("adaptive_tx_power", 20);
+                    vrxBeaconOn = apfpvLinkManager.startBeaconCal(VRX_CAL_SSID, ch, idx);
+                    if (vrxBeaconOn) Toast.makeText(this, String.format(java.util.Locale.US,
+                        "Beaconing \"%s\" ch%d, TX idx %d. On the 2nd phone (no dongle): EIRP estimate → pick \"%s\" → enter ~2 m.",
+                        VRX_CAL_SSID, ch, idx, VRX_CAL_SSID), Toast.LENGTH_LONG).show();
+                }
+                return true;
+            });
         m.add("Reconnect").setOnMenuItemClickListener(i -> {
             if (apfpvLinkManager != null) apfpvLinkManager.refreshAdapters(); return true; });
         // Mode-aware status: dongle has the full funnel (adapter -> connecting ->
