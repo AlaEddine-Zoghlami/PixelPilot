@@ -49,6 +49,19 @@ android {
     buildFeatures {
         viewBinding = true
     }
+
+    // Extract native libs at install (extractNativeLibs=true). The video/wfb
+    // native libs DT_NEEDED the vendored prebuilts (libopus / libsodium /
+    // libusb1.0); with the modern default (libs loaded straight from the APK,
+    // extractNativeLibs=false) those transitive deps aren't resolved and the
+    // first System.loadLibrary fails with UnsatisfiedLinkError "libopus.so not
+    // found". Extracting to the install lib dir makes them resolve reliably.
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+
     buildToolsVersion '35.0.0'
     ndkVersion '26.1.10909125'
 }
