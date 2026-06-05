@@ -88,7 +88,7 @@ public class ApfpvStaLink {
     // All-SSID RF scan via the dongle. BLOCKS for the whole channel sweep, so it
     // is only ever invoked from the worker thread in scan() below. Results arrive
     // on the same worker thread via onNativeScanResult.
-    public static native void nativeStaScan(long inst, ApfpvStaLink link, int fd, int perChannelMs);
+    public static native void nativeStaScan(long inst, ApfpvStaLink link, int fd, int perChannelMs, boolean includeDfs);
 
     // Poll/observe the lifecycle (delivered via registered callback below).
     public static native int  nativeStaGetState(long inst);   // -> StaState ordinal
@@ -117,10 +117,10 @@ public class ApfpvStaLink {
     /** Run an all-SSID dongle scan on a worker thread (nativeStaScan blocks for
      *  the whole channel sweep). Results stream via ScanListener.onSsid; onScanDone
      *  fires when the sweep ends. */
-    public void scan(int fd, int perChannelMs, ScanListener l) {
+    public void scan(int fd, int perChannelMs, boolean includeDfs, ScanListener l) {
         this.scanListener = l;
         new Thread(() -> {
-            try { nativeStaScan(nativeStaLink, this, fd, perChannelMs); }
+            try { nativeStaScan(nativeStaLink, this, fd, perChannelMs, includeDfs); }
             finally { ScanListener sl = scanListener; if (sl != null) sl.onScanDone(); }
         }, "apfpv-scan").start();
     }

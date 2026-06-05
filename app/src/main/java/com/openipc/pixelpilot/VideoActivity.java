@@ -1024,6 +1024,13 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         // APFPV connection actions (simple items on the main menu, gs-style)
         SubMenu m = popup.getMenu().addSubMenu("APFPV");
         m.add("Scan SSIDs...").setOnMenuItemClickListener(i -> { showApfpvScanDialog(); return true; });
+        final boolean dfsOn = getSharedPreferences("pixelpilot", MODE_PRIVATE).getBoolean("apfpv_scan_dfs", true);
+        m.add("Scan DFS channels: " + (dfsOn ? "ON" : "OFF")).setOnMenuItemClickListener(i -> {
+            getSharedPreferences("pixelpilot", MODE_PRIVATE).edit().putBoolean("apfpv_scan_dfs", !dfsOn).apply();
+            android.widget.Toast.makeText(this, "DFS scan " + (!dfsOn ? "enabled — slower, finds ch 52-144" : "disabled"),
+                    android.widget.Toast.LENGTH_SHORT).show();
+            return true;
+        });
         m.add("SSID / Password...").setOnMenuItemClickListener(i -> { showApfpvCredsDialog(); return true; });
         m.add("Reconnect").setOnMenuItemClickListener(i -> {
             if (apfpvLinkManager != null) apfpvLinkManager.refreshAdapters(); return true; });
@@ -1174,6 +1181,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         final android.widget.ArrayAdapter<String> adapter =
             new android.widget.ArrayAdapter<>(this, android.R.layout.simple_list_item_1, labels);
         final boolean[] open = { true };
+        final boolean dfs = getSharedPreferences("pixelpilot", MODE_PRIVATE).getBoolean("apfpv_scan_dfs", true);
         final android.os.Handler h = new android.os.Handler(getMainLooper());
 
         final android.app.AlertDialog dlg = new android.app.AlertDialog.Builder(this)
@@ -1213,11 +1221,11 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
                 runOnUiThread(() -> dlg.setTitle(aps.isEmpty()
                         ? "No SSIDs yet — scanning…" : "Select SSID (strongest first)"));
                 if (open[0]) h.postDelayed(() -> {   // re-poll while the dialog is open
-                    if (open[0]) apfpvLinkManager.scanSsids(200, L[0]);
+                    if (open[0]) apfpvLinkManager.scanSsids(200, dfs, L[0]);
                 }, 3000);
             }
         };
-        if (!apfpvLinkManager.scanSsids(200, L[0]))
+        if (!apfpvLinkManager.scanSsids(200, dfs, L[0]))
             dlg.setTitle("Scan unavailable (no dongle/permission)");
     }
 

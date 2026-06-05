@@ -105,7 +105,7 @@ public class ApfpvLinkManager {
     /** Open the first RTL8812AU dongle and run an all-SSID scan for the picker.
      *  Results stream to the listener on a worker thread (marshal UI updates).
      *  Returns false if there's no dongle / permission / driver yet. */
-    public synchronized boolean scanSsids(int perChannelMs, ApfpvStaLink.ScanListener l) {
+    public synchronized boolean scanSsids(int perChannelMs, boolean includeDfs, ApfpvStaLink.ScanListener l) {
         UsbManager mgr = (UsbManager) context.getSystemService(Context.USB_SERVICE);
         if (mgr == null || staLink == null || staLink.handle() == 0L) return false;
         UsbDevice dev = null;
@@ -122,8 +122,9 @@ public class ApfpvLinkManager {
         int fd = conn.getFileDescriptor();
         if (fd < 0) { conn.close(); return false; }
         Telemetry.event("apfpv_scan", "vidpid",
-                String.format("%04X:%04X", dev.getVendorId(), dev.getProductId()));
-        staLink.scan(fd, perChannelMs, l);
+                String.format("%04X:%04X", dev.getVendorId(), dev.getProductId()),
+                "dfs", String.valueOf(includeDfs));
+        staLink.scan(fd, perChannelMs, includeDfs, l);
         return true;
     }
 

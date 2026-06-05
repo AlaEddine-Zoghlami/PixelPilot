@@ -180,7 +180,8 @@ Java_com_openipc_wfbngrtl8812_ApfpvStaLink_nativeStaDisconnect(JNIEnv*, jclass, 
 // BLOCKS for the whole sweep — Java must call this on a worker thread.
 JNIEXPORT void JNICALL
 Java_com_openipc_wfbngrtl8812_ApfpvStaLink_nativeStaScan(
-        JNIEnv* env, jclass, jlong inst, jobject jlink, jint fd, jint perChannelMs) {
+        JNIEnv* env, jclass, jlong inst, jobject jlink, jint fd, jint perChannelMs,
+        jboolean includeDfs) {
     auto* ctx = reinterpret_cast<StaCtx*>(inst);
     if (!ctx || !ctx->usb) return;
     if (!ctx->jlink) ctx->jlink = env->NewGlobalRef(jlink);
@@ -223,7 +224,8 @@ Java_com_openipc_wfbngrtl8812_ApfpvStaLink_nativeStaScan(
     // supervisor thread and the scan both drive the same USB device and the
     // register reads collide (rtw_read throws). disconnect() is a no-op if idle.
     ctx->station->disconnect();
-    try { ctx->station->scanAll(perChannelMs > 0 ? perChannelMs : 250, onAp); }
+    try { ctx->station->scanAll(perChannelMs > 0 ? perChannelMs : 250,
+                                includeDfs == JNI_TRUE, onAp); }
     catch (...) { LOGE("scanAll threw"); }
 }
 
