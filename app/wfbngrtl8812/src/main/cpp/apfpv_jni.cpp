@@ -9,6 +9,8 @@
 #include <libusb.h>
 #include <memory>
 #include <string>
+#include <thread>
+#include <atomic>
 #include <android/log.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -36,6 +38,11 @@ struct StaCtx {
     jobject                       jlink = nullptr;   // global ref to ApfpvStaLink
     int                           rtpSock = -1;     // UDP -> 127.0.0.1:5600
     sockaddr_in                   rtpDst{};
+    // libusb event loop: drives the async RX URB pool + async TX (send_packet)
+    // for the kernel-style station I/O. Without it the async transfers never
+    // complete -> the auth never radiates.
+    std::thread                   evtThread;
+    std::atomic<bool>             evtRun{false};
 };
 
 // Forward state to Java (onNativeState). The state callback can fire either on
@@ -103,6 +110,16 @@ static bool ensureStation(StaCtx* ctx) {
         ctx->station = std::make_unique<ApfpvStation>(
             &ctx->rtl->adapter(), &ctx->rtl->radioManager(), onRtp, onState);
         ctx->station->setDevice(ctx->rtl.get());
+        // Start the libusb event loop (drives async RX URBs + async TX).
+        if (!ctx->evtRun.load()) {
+            ctx->evtRun.store(true);
+            ctx->evtThread = std::thread([ctx]() {
+                while (ctx->evtRun.load()) {
+                    struct timeval tv { 0, 100000 };
+                    libusb_handle_events_timeout_completed(ctx->usb, &tv, nullptr);
+                }
+            });
+        }
     } catch (...) { LOGE("ensureStation: device setup threw"); return false; }
     return true;
 }
