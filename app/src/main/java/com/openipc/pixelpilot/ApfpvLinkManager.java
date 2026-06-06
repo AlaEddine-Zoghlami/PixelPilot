@@ -148,7 +148,10 @@ public class ApfpvLinkManager {
         int fd = conn.getFileDescriptor();
         if (fd < 0) { conn.close(); return false; }
         Telemetry.event("apfpv_beacon_cal", "ch", String.valueOf(channel), "idx", String.valueOf(txIndex));
-        staLink.startBeaconCal(fd, ssid, channel, txIndex);
+        // Device bring-up (Init) inside startBeaconCal blocks for seconds — run it
+        // off the UI thread or it ANRs. The injector then runs on its own native thread.
+        final int fdF = fd; final String ssidF = ssid; final int chF = channel, idxF = txIndex;
+        new Thread(() -> staLink.startBeaconCal(fdF, ssidF, chF, idxF), "apfpv-beacon-start").start();
         showMessage("VRX beacon ON: \"" + ssid + "\" ch" + channel + " (TX idx " + txIndex + ")");
         return true;
     }
