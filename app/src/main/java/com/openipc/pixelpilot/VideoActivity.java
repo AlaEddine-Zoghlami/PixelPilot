@@ -603,6 +603,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         // Link mode FIRST — it decides the transport (WFB / APFPV dongle /
         // APFPV phone Wi-Fi) and therefore which of the items below apply.
         setupLinkModeSubMenu(popup);   // WFB-ng <-> APFPV transport toggle
+        setupApfpvSubMenu(popup);      // APFPV ssid/pw + tools — placed right under Link Mode (APFPV modes only)
 
         // VR submenu
         setupVRSubMenu(popup);
@@ -627,7 +628,6 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         // --- APFPV integration: the GS-menu knobs (air wfbng knobs for wfb;
         //     full apfpv set for apfpv modes) ---
         setupAirWfbngSubMenu(popup);   // air mcs/fec_k/fec_n/air_channel/width/mlink
-        setupApfpvSubMenu(popup);      // apfpv ssid/pw + aalink + camera (when apfpv)
 
         // Recording submenu
         setupRecordingSubMenu(popup);
@@ -1317,28 +1317,19 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         final android.widget.EditText pass = new android.widget.EditText(this);
         pass.setHint("Password (default 12345678)");
         pass.setText(p.getString("apfpv_pass", "12345678"));
-        final android.widget.EditText chan = new android.widget.EditText(this);
-        chan.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
-        chan.setHint("Channel (e.g. 40, 149)");
-        chan.setText(String.valueOf(p.getInt("apfpv_channel", 40)));
         android.widget.LinearLayout ll = new android.widget.LinearLayout(this);
         ll.setOrientation(android.widget.LinearLayout.VERTICAL);
-        ll.addView(ssid); ll.addView(pass); ll.addView(chan);
+        ll.addView(ssid); ll.addView(pass);
         new android.app.AlertDialog.Builder(this)
-            .setTitle("APFPV credentials + channel")
+            .setTitle("APFPV credentials")
             .setView(ll)
             .setPositiveButton("Save", (d, w2) -> {
-                int ch; try { ch = Integer.parseInt(chan.getText().toString().trim()); } catch (Exception e) { ch = 40; }
-                if (ch <= 0) ch = 40;
+                // No channel field: APFPV follows the AP/VTX channel via discovery.
                 getSharedPreferences("pixelpilot", MODE_PRIVATE).edit()
                     .putString("apfpv_ssid", ssid.getText().toString().isEmpty() ? "OpenIPC" : ssid.getText().toString())
                     .putString("apfpv_pass", pass.getText().toString().isEmpty() ? "12345678" : pass.getText().toString())
-                    .putInt("apfpv_channel", ch)
                     .apply();
-                if (apfpvLinkManager != null) {
-                    apfpvLinkManager.setChannel(ch);   // hint = the AP's channel (tried first)
-                    apfpvLinkManager.refreshAdapters();
-                }
+                if (apfpvLinkManager != null) apfpvLinkManager.refreshAdapters();
             })
             .setNegativeButton("Cancel", null)
             .show();

@@ -211,7 +211,7 @@ public class ApfpvLinkManager {
             return false;
         }
 
-        showMessage("APFPV: connecting to \"" + ssid + "\" ch" + wifiChannel);
+        showMessage("APFPV: connecting to \"" + ssid + "\"…");   // channel follows the AP (discovery)
 
         // Flow event + Crashlytics keys so a crash in the native chain below is
         // pinpointed (the JNI call can SIGSEGV — no Java stack otherwise).
