@@ -268,6 +268,12 @@ Java_com_openipc_wfbngrtl8812_ApfpvStaLink_nativeStaGetState(JNIEnv*, jclass, jl
 }
 
 JNIEXPORT jint JNICALL
+Java_com_openipc_wfbngrtl8812_ApfpvStaLink_nativeStaGetChannel(JNIEnv*, jclass, jlong inst) {
+    auto* ctx = reinterpret_cast<StaCtx*>(inst);
+    return (ctx && ctx->station) ? (jint)ctx->station->channel() : 0;
+}
+
+JNIEXPORT jint JNICALL
 Java_com_openipc_wfbngrtl8812_ApfpvStaLink_nativeStaGetRssi(JNIEnv*, jclass, jlong inst) {
     auto* ctx = reinterpret_cast<StaCtx*>(inst);
     return (ctx && ctx->station) ? (jint)ctx->station->rssiDbm() : -99;

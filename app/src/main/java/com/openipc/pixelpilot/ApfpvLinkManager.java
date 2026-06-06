@@ -280,22 +280,24 @@ public class ApfpvLinkManager {
     // Framed as the user-facing dongle flow: adapter -> connecting to SSID ->
     // connected to SSID -> APFPV found (streaming) / not found.
     private String labelFor(StaState s) {
+        int ch = (staLink != null) ? staLink.getChannel() : 0;
+        String onCh = ch > 0 ? " (ch" + ch + ")" : "";
         switch (s) {
             case SCANNING:       return "Searching for \"" + ssid + "\"…";
-            case ARMING:         return "Connecting to \"" + ssid + "\"…";
-            case AUTHENTICATING:
-            case ASSOCIATING:
-            case HANDSHAKING:    return "Connecting to \"" + ssid + "\"…";
-            case DHCP:           return "Connected to \"" + ssid + "\" — getting IP…";
-            case STREAMING:      return "APFPV connected — video on \"" + ssid + "\"";
-            case FAIL_NO_AP:     return "\"" + ssid + "\" not found — check channel/range";
-            case FAIL_TX:        return "Adapter TX problem (descriptor)";
-            case FAIL_NO_ACK:    return "Adapter can't ACK in station mode (use WFB-ng)";
-            case FAIL_AUTH:      return "Wrong password / handshake failed";
-            case FAIL_DHCP:      return "Connected to \"" + ssid + "\" — APFPV not found (no IP)";
-            case LINK_LOST:      return "Link lost";
+            case ARMING:         return "Found \"" + ssid + "\"" + onCh + " — arming…";
+            case AUTHENTICATING: return "Found" + onCh + " — authenticating…";
+            case ASSOCIATING:    return "Associating" + onCh + "…";
+            case HANDSHAKING:    return "WPA2 handshake" + onCh + "…";
+            case DHCP:           return "Connected" + onCh + " — getting IP…";
+            case STREAMING:      return "APFPV connected — video on \"" + ssid + "\"" + onCh;
+            case FAIL_NO_AP:     return "\"" + ssid + "\" not found — check it's on + in range";
+            case FAIL_TX:        return "Found" + onCh + " but no auth reply (range / AP busy?)";
+            case FAIL_NO_ACK:    return "Deauthed during association" + onCh;
+            case FAIL_AUTH:      return "Assoc/handshake failed — wrong password?";
+            case FAIL_DHCP:      return "Associated" + onCh + " — no IP (not an APFPV AP?)";
+            case LINK_LOST:      return "Link lost — reconnecting…";
             case RECONNECTING:   return "Reconnecting…";
-            case IDLE:           return hasDongle() ? "Adapter connected — ready" : "No adapter";
+            case IDLE:           return hasDongle() ? "Adapter ready" : "No adapter";
             default:             return "";
         }
     }

@@ -103,6 +103,8 @@ public class ApfpvStaLink {
     // Poll/observe the lifecycle (delivered via registered callback below).
     public static native int  nativeStaGetState(long inst);   // -> StaState ordinal
     public static native int  nativeStaGetRssi(long inst);    // dongle dBm
+    public static native int  nativeStaGetChannel(long inst); // resolved AP channel
+    public int getChannel() { return nativeStaGetChannel(nativeStaLink); }
 
     // The LQ-feedback sender (dongle RSSI -> VTX 192.168.0.1:12345) lives native;
     // toggle it here. Makes the fork BETTER than stock phone-APFPV (which sends
