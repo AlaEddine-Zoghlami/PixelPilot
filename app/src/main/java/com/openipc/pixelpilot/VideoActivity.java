@@ -1310,22 +1310,35 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
 
     /** Minimal SSID/password entry for APFPV association. */
     private void showApfpvCredsDialog() {
+        android.content.SharedPreferences p = getSharedPreferences("pixelpilot", MODE_PRIVATE);
         final android.widget.EditText ssid = new android.widget.EditText(this);
         ssid.setHint("SSID (default OpenIPC)");
+        ssid.setText(p.getString("apfpv_ssid", "OpenIPC"));
         final android.widget.EditText pass = new android.widget.EditText(this);
         pass.setHint("Password (default 12345678)");
+        pass.setText(p.getString("apfpv_pass", "12345678"));
+        final android.widget.EditText chan = new android.widget.EditText(this);
+        chan.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        chan.setHint("Channel (e.g. 40, 149)");
+        chan.setText(String.valueOf(p.getInt("apfpv_channel", 40)));
         android.widget.LinearLayout ll = new android.widget.LinearLayout(this);
         ll.setOrientation(android.widget.LinearLayout.VERTICAL);
-        ll.addView(ssid); ll.addView(pass);
+        ll.addView(ssid); ll.addView(pass); ll.addView(chan);
         new android.app.AlertDialog.Builder(this)
-            .setTitle("APFPV credentials")
+            .setTitle("APFPV credentials + channel")
             .setView(ll)
             .setPositiveButton("Save", (d, w2) -> {
+                int ch; try { ch = Integer.parseInt(chan.getText().toString().trim()); } catch (Exception e) { ch = 40; }
+                if (ch <= 0) ch = 40;
                 getSharedPreferences("pixelpilot", MODE_PRIVATE).edit()
                     .putString("apfpv_ssid", ssid.getText().toString().isEmpty() ? "OpenIPC" : ssid.getText().toString())
                     .putString("apfpv_pass", pass.getText().toString().isEmpty() ? "12345678" : pass.getText().toString())
+                    .putInt("apfpv_channel", ch)
                     .apply();
-                if (apfpvLinkManager != null) apfpvLinkManager.refreshAdapters();
+                if (apfpvLinkManager != null) {
+                    apfpvLinkManager.setChannel(ch);   // hint = the AP's channel (tried first)
+                    apfpvLinkManager.refreshAdapters();
+                }
             })
             .setNegativeButton("Cancel", null)
             .show();
