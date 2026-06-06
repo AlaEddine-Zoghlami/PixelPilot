@@ -132,7 +132,7 @@ Java_com_openipc_wfbngrtl8812_ApfpvStaLink_nativeStaInitialize(JNIEnv* env, jcla
 JNIEXPORT void JNICALL
 Java_com_openipc_wfbngrtl8812_ApfpvStaLink_nativeStaConnect(
         JNIEnv* env, jclass, jlong inst, jobject jlink, jint fd,
-        jint channel, jint bandwidth, jstring jssid, jstring jpass) {
+        jint channel, jint bandwidth, jstring jssid, jstring jpass, jstring jbssid) {
     auto* ctx = reinterpret_cast<StaCtx*>(inst);
     if (!ctx) return;
     if (!ctx->jlink) ctx->jlink = env->NewGlobalRef(jlink);
@@ -157,12 +157,21 @@ Java_com_openipc_wfbngrtl8812_ApfpvStaLink_nativeStaConnect(
 
     const char* ssid = env->GetStringUTFChars(jssid, nullptr);
     const char* pass = env->GetStringUTFChars(jpass, nullptr);
+    const char* bstr = jbssid ? env->GetStringUTFChars(jbssid, nullptr) : nullptr;
     try {
         // Stop any prior scan/supervisor on this device before a fresh connect.
         ctx->station->disconnect();
         ApfpvStation::Params p;
         p.channel = channel; p.bandwidth = bandwidth;
         p.ssid = ssid; p.passphrase = pass; p.lqFeedback = true;
+        // Phone-assisted: parse "aa:bb:cc:dd:ee:ff" -> skip the dongle sweep.
+        if (bstr && bstr[0]) {
+            unsigned b[6];
+            if (sscanf(bstr, "%x:%x:%x:%x:%x:%x", &b[0],&b[1],&b[2],&b[3],&b[4],&b[5]) == 6) {
+                for (int i = 0; i < 6; ++i) p.bssid[i] = (uint8_t)b[i];
+                p.haveBssid = true; p.scan = false;
+            }
+        }
         ctx->station->connect(p);     // runs the gated chain; states -> Java
     } catch (const std::exception& e) {
         LOGE("APFPV connect threw: %s", e.what());
@@ -174,6 +183,7 @@ Java_com_openipc_wfbngrtl8812_ApfpvStaLink_nativeStaConnect(
 
     env->ReleaseStringUTFChars(jssid, ssid);
     env->ReleaseStringUTFChars(jpass, pass);
+    if (bstr) env->ReleaseStringUTFChars(jbssid, bstr);
 }
 
 JNIEXPORT void JNICALL

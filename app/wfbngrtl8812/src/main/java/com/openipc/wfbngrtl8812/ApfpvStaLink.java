@@ -81,7 +81,8 @@ public class ApfpvStaLink {
     // Carries CREDENTIALS — the thing WfbNgLink never needed.
     public static native long nativeStaInitialize(Context context);
 
-    public static native void nativeStaConnect(long inst, ApfpvStaLink link, int fd, int channel, int bandwidth, String ssid, String pass);
+    // bssid: "aa:bb:cc:dd:ee:ff" (phone-resolved) -> skip the dongle sweep; "" -> sweep.
+    public static native void nativeStaConnect(long inst, ApfpvStaLink link, int fd, int channel, int bandwidth, String ssid, String pass, String bssid);
 
     public static native void nativeStaDisconnect(long inst, int fd);
 
@@ -142,9 +143,9 @@ public class ApfpvStaLink {
 
     private int currentFd = -1;
     /** Instance wrapper: associate this dongle (fd) to the AP in station mode. */
-    public void connect(int fd, int channel, int bandwidth, String ssid, String pass) {
+    public void connect(int fd, int channel, int bandwidth, String ssid, String pass, String bssid) {
         this.currentFd = fd;
-        nativeStaConnect(nativeStaLink, this, fd, channel, bandwidth, ssid, pass);
+        nativeStaConnect(nativeStaLink, this, fd, channel, bandwidth, ssid, pass, bssid == null ? "" : bssid);
     }
     /** Instance wrapper: tear down the station link. */
     public void disconnect() {

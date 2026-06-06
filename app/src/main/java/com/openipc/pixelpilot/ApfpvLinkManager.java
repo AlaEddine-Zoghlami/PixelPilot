@@ -224,16 +224,39 @@ public class ApfpvLinkManager {
         // It MUST run off the UI thread — running it inline froze the main thread
         // and Android killed the app with an ANR. Drive it on a worker; progress
         // arrives via the state callbacks (which post back to the UI thread).
+        // PHONE-ASSISTED: the phone's own Wi-Fi already sees the AP, so resolve its
+        // BSSID + channel here and hand them to the dongle — it then arms straight
+        // to that BSSID/channel instead of the slow, flaky beacon sweep.
+        String bssid = ""; int resolvedCh = wifiChannel;
+        try {
+            android.net.wifi.WifiManager wm = (android.net.wifi.WifiManager)
+                    context.getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+            if (wm != null) {
+                for (android.net.wifi.ScanResult r : wm.getScanResults()) {
+                    if (ssid.equals(r.SSID)) { bssid = r.BSSID; resolvedCh = freqToChannel(r.frequency); break; }
+                }
+            }
+        } catch (Exception ignored) {}
+        if (!bssid.isEmpty()) wifiChannel = resolvedCh;
+        Telemetry.event("apfpv_resolve", "bssid", bssid.isEmpty() ? "none" : bssid, "ch", String.valueOf(resolvedCh));
         final long handle = staLink.handle();
         final int fdF = fd, chF = wifiChannel, bwF = bandWidth;
-        final String ssidF = ssid, passF = passphrase;
+        final String ssidF = ssid, passF = passphrase, bssidF = bssid;
         new Thread(() -> {
             // State callbacks drive the UI; STREAMING => video on 5600.
-            ApfpvStaLink.nativeStaConnect(handle, staLink, fdF, chF, bwF, ssidF, passF);
+            ApfpvStaLink.nativeStaConnect(handle, staLink, fdF, chF, bwF, ssidF, passF, bssidF);
             // Turn on dongle-RSSI -> VTX:12345 feedback (better than stock phone-APFPV)
             ApfpvStaLink.nativeStaSetLqFeedback(handle, true);
         }, "apfpv-connect").start();
         return true;
+    }
+
+    /** Wi-Fi centre frequency (MHz) -> 802.11 channel number. */
+    private static int freqToChannel(int freqMHz) {
+        if (freqMHz == 2484) return 14;
+        if (freqMHz >= 2412 && freqMHz <= 2472) return (freqMHz - 2407) / 5;   // 2.4 GHz 1-13
+        if (freqMHz >= 5000 && freqMHz <= 5900) return (freqMHz - 5000) / 5;   // 5 GHz
+        return 40;
     }
 
     /** Ask the user for USB access to this dongle (same intent the WFB path uses). */
