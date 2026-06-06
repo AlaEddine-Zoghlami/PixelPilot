@@ -232,12 +232,19 @@ public class ApfpvLinkManager {
             android.net.wifi.WifiManager wm = (android.net.wifi.WifiManager)
                     context.getApplicationContext().getSystemService(Context.WIFI_SERVICE);
             if (wm != null) {
+                try { wm.startScan(); } catch (Exception ignored) {}   // ask for a fresh sweep
+                long nowUs = android.os.SystemClock.elapsedRealtime() * 1000L;
                 for (android.net.wifi.ScanResult r : wm.getScanResults()) {
-                    if (ssid.equals(r.SSID)) { bssid = r.BSSID; resolvedCh = freqToChannel(r.frequency); break; }
+                    if (!ssid.equals(r.SSID)) continue;
+                    long ageMs = (nowUs - r.timestamp) / 1000L;
+                    // Only trust a FRESH result (<20 s). A stale cache (we've seen 6-day-
+                    // old entries) gives a wrong channel -> we arm off-channel -> TXFAIL.
+                    if (ageMs >= 0 && ageMs < 20000) { bssid = r.BSSID; resolvedCh = freqToChannel(r.frequency); }
+                    break;
                 }
             }
         } catch (Exception ignored) {}
-        if (!bssid.isEmpty()) wifiChannel = resolvedCh;
+        if (!bssid.isEmpty()) wifiChannel = resolvedCh;   // else: native does the live sweep
         Telemetry.event("apfpv_resolve", "bssid", bssid.isEmpty() ? "none" : bssid, "ch", String.valueOf(resolvedCh));
         final long handle = staLink.handle();
         final int fdF = fd, chF = wifiChannel, bwF = bandWidth;
