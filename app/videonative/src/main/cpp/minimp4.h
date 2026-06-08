@@ -62,6 +62,10 @@ extern "C"
 /************************************************************************/
 // MPEG-4 AAC (all profiles)
 #define MP4_OBJECT_TYPE_AUDIO_ISO_IEC_14496_3 0x40
+
+/* APFPV: Opus has no standard MP4 object-type; this sentinel makes the writer emit an
+ * 'Opus' sample entry + 'dOps' OpusSpecificBox instead of 'mp4a' + 'esds'. */
+#define MP4_OBJECT_TYPE_AUDIO_OPUS 0xAD
 // MPEG-2 AAC, Main profile
 #define MP4_OBJECT_TYPE_AUDIO_ISO_IEC_13818_7_MAIN_PROFILE 0x66
 // MPEG-2 AAC, LC profile
@@ -1475,7 +1479,31 @@ static int mp4e_flush_index(MP4E_mux_t* mux)
         ATOM_FULL(BOX_stsd, 0);
         WRITE_4(1);  // entry_count;
 
-        if (tr->info.track_media_kind == e_audio || tr->info.track_media_kind == e_private)
+        if (tr->info.track_media_kind == e_audio &&
+            tr->info.object_type_indication == MP4_OBJECT_TYPE_AUDIO_OPUS)
+        {
+            // OpusSampleEntry: 'Opus' sample entry + 'dOps' OpusSpecificBox (RFC 7845 in ISOBMFF)
+            ATOM(FOUR_CHAR_INT('O', 'p', 'u', 's'));
+            WRITE_4(0);
+            WRITE_2(0);                            // reserved[6]
+            WRITE_2(1);                            // data_reference_index
+            WRITE_4(0);
+            WRITE_4(0);                            // reserved[2]
+            WRITE_2(tr->info.u.a.channelcount);    // channelcount
+            WRITE_2(16);                           // samplesize
+            WRITE_4(0);                            // pre_defined + reserved
+            WRITE_4((tr->info.time_scale << 16));  // samplerate = timescale<<16 (48000<<16)
+            ATOM(FOUR_CHAR_INT('d', 'O', 'p', 's'));  // OpusSpecificBox — plain Box, NOT a FullBox
+            WRITE_1(0);                            // Version
+            WRITE_1(tr->info.u.a.channelcount);    // OutputChannelCount
+            WRITE_2(3840);                         // PreSkip (48 kHz default)
+            WRITE_4(48000);                        // InputSampleRate
+            WRITE_2(0);                            // OutputGain (Q7.8, 0)
+            WRITE_1(0);                            // ChannelMappingFamily (0 = mono/stereo)
+            END_ATOM;  // dOps
+            END_ATOM;  // Opus
+        }
+        else if (tr->info.track_media_kind == e_audio || tr->info.track_media_kind == e_private)
         {
             // AudioSampleEntry() assume MP4E_HANDLER_TYPE_SOUN
             if (tr->info.track_media_kind == e_audio)

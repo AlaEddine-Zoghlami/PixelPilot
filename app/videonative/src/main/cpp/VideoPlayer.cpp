@@ -49,12 +49,13 @@ void VideoPlayer::processQueue()
         __android_log_print(ANDROID_LOG_ERROR, TAG, "dvr open failed");
         return;
     }
+    audioTrackId = -1;  // fresh recording: the Opus audio track is added lazily on the first packet
 
     while (true)
     {
         last_dvr_write = get_time_ms();
         std::unique_lock<std::mutex> lock(mtx);
-        cv.wait(lock, [this] { return !naluQueue.empty() || stopFlag; });
+        cv.wait(lock, [this] { return !naluQueue.empty() || !audioRecQueue.empty() || stopFlag; });
         if (stopFlag)
         {
             break;
@@ -93,6 +94,34 @@ void VideoPlayer::processQueue()
                 __android_log_print(ANDROID_LOG_DEBUG, TAG, "mp4_h26x_write_nal failed with %d", res);
             }
         }
+        // Mux any queued Opus audio into the same MP4 (audio track added lazily on first packet).
+        if (!lock.owns_lock())
+        {
+            lock.lock();
+        }
+        while (!audioRecQueue.empty())
+        {
+            AudioRecPacket ap = std::move(audioRecQueue.front());
+            audioRecQueue.pop();
+            lock.unlock();
+            if (audioTrackId < 0)
+            {
+                MP4E_track_t at           = {};
+                at.object_type_indication = MP4_OBJECT_TYPE_AUDIO_OPUS;
+                at.track_media_kind       = e_audio;
+                at.time_scale             = 48000;
+                at.u.a.channelcount       = 1;
+                at.language[0] = 'u'; at.language[1] = 'n'; at.language[2] = 'd'; at.language[3] = 0;
+                audioTrackId = MP4E_add_track(mux, &at);
+                __android_log_print(ANDROID_LOG_DEBUG, TAG, "dvr: Opus audio track id=%d", audioTrackId);
+            }
+            if (audioTrackId >= 0)
+            {
+                MP4E_put_sample(mux, audioTrackId, ap.data.data(), (int) ap.data.size(),
+                                ap.durationSamples, MP4E_SAMPLE_RANDOM_ACCESS);
+            }
+            lock.lock();
+        }
     }
 
     MP4E_close(mux);
@@ -119,6 +148,15 @@ void VideoPlayer::onNewRTPData(const uint8_t* data, const std::size_t data_lengt
         if (rtpPacket.header.payload == RTP_PAYLOAD_TYPE_AUDIO)
         {
             audioDecoder.enqueueAudio(packet_data, packet_length);
+            // Also capture the raw Opus payload for the DVR recording when one is active.
+            if (isRecording() && packet_length > 12)
+            {
+                const uint8_t* op    = packet_data + 12;  // strip RTP header (matches AudioDecoder)
+                int            oplen = (int) packet_length - 12;
+                int            fs    = opus_packet_get_samples_per_frame(op, 48000);
+                int            nf    = opus_packet_get_nb_frames(op, oplen);
+                enqueueAudioForRecording(op, oplen, (fs > 0 && nf > 0) ? fs * nf : 960);
+            }
         }
         else
         {

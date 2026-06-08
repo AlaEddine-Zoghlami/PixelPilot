@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <fstream>
 #include <queue>
+#include <vector>
 #include "AudioDecoder.h"
 #include "BufferedPacketQueue.h"
 #include "UdpReceiver.h"
@@ -81,6 +82,24 @@ class VideoPlayer
     std::thread             processingThread;
     int                     dvr_mp4_fragmentation = 0;
     uint64_t                last_dvr_write        = 0;
+
+    // Opus audio captured for the DVR recording, muxed into the same .mp4 as the video.
+    struct AudioRecPacket
+    {
+        std::vector<uint8_t> data;
+        int                  durationSamples;  // in 48 kHz samples (Opus frame)
+    };
+    std::queue<AudioRecPacket> audioRecQueue;
+    int                        audioTrackId = -1;
+
+    void enqueueAudioForRecording(const uint8_t* opusPayload, int len, int durationSamples)
+    {
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+            audioRecQueue.push({std::vector<uint8_t>(opusPayload, opusPayload + len), durationSamples});
+        }
+        cv.notify_one();
+    }
 
     void enqueueNALU(const NALU& nalu)
     {
