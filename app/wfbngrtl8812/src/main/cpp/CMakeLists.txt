@@ -16,7 +16,9 @@ project("WfbngRtl8812")
 set(WD ${CMAKE_SOURCE_DIR}/devourer/extern/WiFiDriver)
 set(DV ${CMAKE_SOURCE_DIR}/devourer)
 
-include_directories(include ${WD}/hal ${WD}/hal/phydm/rtl8814a ${WD}/src ${WD}/wfb ${WD}/wfb/wfb-ng ${DV}/src ${DV}/jni)
+# ${WD} (the WiFiDriver root) is on the path so the wfb files' "src/..." / "hal/..." includes
+# (relative to the driver root) resolve, alongside the bare-name includes via ${WD}/src etc.
+include_directories(include ${WD} ${WD}/hal ${WD}/hal/phydm/rtl8814a ${WD}/src ${WD}/wfb ${WD}/wfb/wfb-ng ${DV}/src ${DV}/jni)
 
 # --- wfb-ng (wifibroadcast FEC), verbatim from WiFiDriver/wfb ---------------
 add_library(wfb-ng STATIC
