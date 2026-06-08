@@ -2,11 +2,34 @@
 
 > [!IMPORTANT]
 > This is the **APFPV** fork of [OpenIPC/PixelPilot](https://github.com/OpenIPC/PixelPilot).
-> In addition to the stock wfb-ng ground-station, it adds a **direct air↔phone
-> link** ("APFPV") that drives an RTL8812AU USB adapter in **station mode** from
-> userspace — no kernel MLME, no root — via the forked devourer driver.
+> It keeps the stock **wfb-ng** (wifibroadcast) ground-station **and** adds a **direct
+> air↔phone link** ("APFPV") that drives an RTL8812AU USB adapter in **station mode**
+> from userspace — no kernel MLME, no root. So the app now does **both wfb and APFPV** modes.
+>
+> It is the top of a 3-repo stack:
+> **[WiFiDriver](https://github.com/AlaEddine-Zoghlami/WiFiDriver)** — the first userspace
+> station-mode driver for the RTL8812AU — → **[devourer](https://github.com/AlaEddine-Zoghlami/Devourer)**
+> (IP / FPV / JNI) → **PixelPilot** (this app). Build instructions below.
 >
 > Performance depends heavily on your device's processing power. Use at your own risk.
+
+## Building this fork
+
+Needs the **Android SDK** + **NDK `26.1.10909125`**, build-tools 35, and a JDK 17+. The native
+`wfbngrtl8812` module pulls in the **devourer** and (nested) **WiFiDriver** submodules, so clone
+recursively:
+
+```sh
+git clone --recursive https://github.com/AlaEddine-Zoghlami/PixelPilot.git
+# in an existing clone:  git submodule update --init --recursive
+
+./gradlew :app:assembleDebug                 # debug APK
+./gradlew :app:assembleRelease               # signed release APK (needs ./fpv.jks — see app/build.gradle)
+```
+
+The native `libWfbngRtl8812.so` is built by `app/wfbngrtl8812/src/main/cpp/CMakeLists.txt`, which
+compiles the WiFiDriver driver + the devourer IP/FPV layer + the wfb logic + the JNI into one
+library. Prebuilt APKs: the [Releases](https://github.com/AlaEddine-Zoghlami/PixelPilot/releases) page.
 
 ## Introduction
 
