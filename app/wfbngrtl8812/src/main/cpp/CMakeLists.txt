@@ -1,144 +1,72 @@
-
 cmake_minimum_required(VERSION 3.22.1)
 
 project("WfbngRtl8812")
 
-include_directories(include)
+# ---------------------------------------------------------------------------
+#  Layered sources now live in the submodules:
+#    devourer/extern/WiFiDriver  — libusb RTL8812AU driver + Station L2 + crypto + wfb logic
+#    devourer/src                — the APFPV IP/FPV/session layer (5 files)
+#    devourer/jni                — the JNI bridges (apfpv_jni + WfbngLink)
+#
+#  ⚠️ EVERYTHING is compiled DIRECTLY into the .so — NOT into an intermediate static driver
+#  lib. Splitting the driver into its own static lib drops static-init .o and SILENTLY breaks
+#  TX (auth frames stop radiating). The host build works around it with --whole-archive; the
+#  Android .so simply compiles all driver/apfpv/jni .o in. See the apfpv-3repo-refactor note.
+# ---------------------------------------------------------------------------
+set(WD ${CMAKE_SOURCE_DIR}/devourer/extern/WiFiDriver)
+set(DV ${CMAKE_SOURCE_DIR}/devourer)
 
+include_directories(include ${WD}/hal ${WD}/hal/phydm/rtl8814a ${WD}/src ${WD}/wfb ${WD}/wfb/wfb-ng ${DV}/src ${DV}/jni)
+
+# --- wfb-ng (wifibroadcast FEC), verbatim from WiFiDriver/wfb ---------------
 add_library(wfb-ng STATIC
-        ${CMAKE_SOURCE_DIR}/wfb-ng/src/zfex.c
-        ${CMAKE_SOURCE_DIR}/wfb-ng/src/zfex.h
-        ${CMAKE_SOURCE_DIR}/wfb-ng/src/ieee80211_radiotap.h
-        ${CMAKE_SOURCE_DIR}/wfb-ng/src/radiotap.c
-        ${CMAKE_SOURCE_DIR}/wfb-ng/src/rx.cpp
-        ${CMAKE_SOURCE_DIR}/wfb-ng/src/rx.hpp
-        ${CMAKE_SOURCE_DIR}/wfb-ng/src/wifibroadcast.hpp
-        ${CMAKE_SOURCE_DIR}/wfb-ng/src/wifibroadcast.cpp)
-set_target_properties(wfb-ng PROPERTIES INTERFACE_INCLUDE_DIRECTORIES ${CMAKE_SOURCE_DIR}/wfb-ng)
-target_include_directories(wfb-ng PUBLIC ${CMAKE_SOURCE_DIR}/wfb-ng)
+        ${WD}/wfb/wfb-ng/src/zfex.c
+        ${WD}/wfb/wfb-ng/src/radiotap.c
+        ${WD}/wfb/wfb-ng/src/rx.cpp
+        ${WD}/wfb/wfb-ng/src/wifibroadcast.cpp)
+target_include_directories(wfb-ng PUBLIC ${WD}/wfb/wfb-ng)
 target_compile_definitions(wfb-ng PRIVATE
         __WFB_RX_SHARED_LIBRARY__
-        PREINCLUDE_FILE=<${CMAKE_SOURCE_DIR}/wfb_log.h>
+        PREINCLUDE_FILE=<${WD}/wfb/wfb_log.h>
         ZFEX_UNROLL_ADDMUL_SIMD=8
         ZFEX_USE_INTEL_SSSE3
         ZFEX_USE_ARM_NEON
         ZFEX_INLINE_ADDMUL
-        ZFEX_INLINE_ADDMUL_SIMD
-)
+        ZFEX_INLINE_ADDMUL_SIMD)
 
-add_library(devourer STATIC
-        ${CMAKE_SOURCE_DIR}/devourer/hal/Hal8812PhyReg.h
-        ${CMAKE_SOURCE_DIR}/devourer/hal/Hal8812PwrSeq.c
-        ${CMAKE_SOURCE_DIR}/devourer/hal/Hal8812PwrSeq.h
-        ${CMAKE_SOURCE_DIR}/devourer/hal/Hal8812a_TxPwrTrack.cpp
-        ${CMAKE_SOURCE_DIR}/devourer/hal/Hal8812a_TxPwrTrack.h
-        ${CMAKE_SOURCE_DIR}/devourer/hal/Hal8814_PostFwdlReplay.h
-        ${CMAKE_SOURCE_DIR}/devourer/hal/Hal8814PwrSeq.c
-        ${CMAKE_SOURCE_DIR}/devourer/hal/Hal8814PwrSeq.h
-        ${CMAKE_SOURCE_DIR}/devourer/hal/Hal8821APwrSeq.c
-        ${CMAKE_SOURCE_DIR}/devourer/hal/Hal8821APwrSeq.h
-        ${CMAKE_SOURCE_DIR}/devourer/hal/Hal8821PhyReg.h
-        ${CMAKE_SOURCE_DIR}/devourer/hal/basic_types.h
-        ${CMAKE_SOURCE_DIR}/devourer/hal/hal8812a_fw.c
-        ${CMAKE_SOURCE_DIR}/devourer/hal/hal8812a_fw.h
-        ${CMAKE_SOURCE_DIR}/devourer/hal/hal8814a_fw.c
-        ${CMAKE_SOURCE_DIR}/devourer/hal/hal8814a_fw.h
-        ${CMAKE_SOURCE_DIR}/devourer/hal/hal8821a_fw.c
-        ${CMAKE_SOURCE_DIR}/devourer/hal/hal8821a_fw.h
-        ${CMAKE_SOURCE_DIR}/devourer/hal/hal_com_reg.h
-        ${CMAKE_SOURCE_DIR}/devourer/hal/rtl8812a_hal.h
-        ${CMAKE_SOURCE_DIR}/devourer/hal/rtl8812a_recv.h
-        ${CMAKE_SOURCE_DIR}/devourer/hal/rtl8812a_spec.h
-        ${CMAKE_SOURCE_DIR}/devourer/hal/phydm/rtl8814a/Hal8814_PhyTables.c
-        ${CMAKE_SOURCE_DIR}/devourer/hal/phydm/rtl8814a/Hal8814_PhyTables.h
+# --- explicit HAL sources (phydm/*.c reference tables are NOT compiled) -----
+set(WD_HAL
+        ${WD}/hal/Hal8812PwrSeq.c
+        ${WD}/hal/Hal8812a_TxPwrTrack.cpp
+        ${WD}/hal/Hal8814PwrSeq.c
+        ${WD}/hal/Hal8821APwrSeq.c
+        ${WD}/hal/hal8812a_fw.c
+        ${WD}/hal/hal8814a_fw.c
+        ${WD}/hal/hal8821a_fw.c
+        ${WD}/hal/phydm/rtl8814a/Hal8814_PhyTables.c)
+file(GLOB WD_SRC ${WD}/src/*.cpp ${WD}/src/*.c ${WD}/src/crypto/*.cpp)
 
-        ${CMAKE_SOURCE_DIR}/devourer/src/Radiotap.c
-        ${CMAKE_SOURCE_DIR}/devourer/src/registry_priv.h
-        ${CMAKE_SOURCE_DIR}/devourer/src/ieee80211_radiotap.h
-
-        ${CMAKE_SOURCE_DIR}/devourer/src/EepromManager.cpp
-        ${CMAKE_SOURCE_DIR}/devourer/src/EepromManager.h
-        ${CMAKE_SOURCE_DIR}/devourer/src/Firmware.h
-        ${CMAKE_SOURCE_DIR}/devourer/src/FirmwareManager.cpp
-        ${CMAKE_SOURCE_DIR}/devourer/src/FirmwareManager.h
-        ${CMAKE_SOURCE_DIR}/devourer/src/FrameParser.cpp
-        ${CMAKE_SOURCE_DIR}/devourer/src/FrameParser.h
-        ${CMAKE_SOURCE_DIR}/devourer/src/HalModule.cpp
-        ${CMAKE_SOURCE_DIR}/devourer/src/HalModule.h
-        ${CMAKE_SOURCE_DIR}/devourer/src/Iqk8812a.cpp
-        ${CMAKE_SOURCE_DIR}/devourer/src/Iqk8812a.h
-        ${CMAKE_SOURCE_DIR}/devourer/src/Iqk8814a.cpp
-        ${CMAKE_SOURCE_DIR}/devourer/src/Iqk8814a.h
-        ${CMAKE_SOURCE_DIR}/devourer/src/PhydmWatchdog.cpp
-        ${CMAKE_SOURCE_DIR}/devourer/src/PhydmWatchdog.h
-        ${CMAKE_SOURCE_DIR}/devourer/src/PhyTableLoader.cpp
-        ${CMAKE_SOURCE_DIR}/devourer/src/PhyTableLoader.h
-        ${CMAKE_SOURCE_DIR}/devourer/src/PowerTracking8812a.cpp
-        ${CMAKE_SOURCE_DIR}/devourer/src/PowerTracking8812a.h
-        ${CMAKE_SOURCE_DIR}/devourer/src/ParsedRadioPacket.cpp
-        ${CMAKE_SOURCE_DIR}/devourer/src/RadioManagementModule.cpp
-        ${CMAKE_SOURCE_DIR}/devourer/src/RadioManagementModule.h
-        ${CMAKE_SOURCE_DIR}/devourer/src/RtlJaguarDevice.cpp
-        ${CMAKE_SOURCE_DIR}/devourer/src/RtlJaguarDevice.h
-        ${CMAKE_SOURCE_DIR}/devourer/src/RtlUsbAdapter.cpp
-        ${CMAKE_SOURCE_DIR}/devourer/src/RtlUsbAdapter.h
-        ${CMAKE_SOURCE_DIR}/devourer/src/SelectedChannel.h
-        ${CMAKE_SOURCE_DIR}/devourer/src/WiFiDriver.cpp
-        ${CMAKE_SOURCE_DIR}/devourer/src/WiFiDriver.h
-        ${CMAKE_SOURCE_DIR}/devourer/src/ScanProbe.cpp
-        ${CMAKE_SOURCE_DIR}/devourer/src/ScanProbe.h
-        ${CMAKE_SOURCE_DIR}/devourer/src/StationMode.cpp
-        ${CMAKE_SOURCE_DIR}/devourer/src/StationMode.h
-        ${CMAKE_SOURCE_DIR}/devourer/src/StationTxDesc.cpp
-        ${CMAKE_SOURCE_DIR}/devourer/src/StationTxDesc.h
-        ${CMAKE_SOURCE_DIR}/devourer/src/Dot11Frames.cpp
-        ${CMAKE_SOURCE_DIR}/devourer/src/Dot11Frames.h
-        ${CMAKE_SOURCE_DIR}/devourer/src/Wpa2Supplicant.cpp
-        ${CMAKE_SOURCE_DIR}/devourer/src/Wpa2Supplicant.h
-        ${CMAKE_SOURCE_DIR}/devourer/src/Wpa2Crypto.cpp
-        ${CMAKE_SOURCE_DIR}/devourer/src/Wpa2Crypto.h
-        ${CMAKE_SOURCE_DIR}/devourer/src/ApfpvDhcp.cpp
-        ${CMAKE_SOURCE_DIR}/devourer/src/ApfpvDhcp.h
-        ${CMAKE_SOURCE_DIR}/devourer/src/LqFeedback.cpp
-        ${CMAKE_SOURCE_DIR}/devourer/src/LqFeedback.h
-        ${CMAKE_SOURCE_DIR}/devourer/src/RxDeframe.cpp
-        ${CMAKE_SOURCE_DIR}/devourer/src/RxDeframe.h
-        ${CMAKE_SOURCE_DIR}/devourer/src/ApfpvStation.cpp
-        ${CMAKE_SOURCE_DIR}/devourer/src/ApfpvStation.h
-        ${CMAKE_SOURCE_DIR}/devourer/src/crypto/Sha1Hmac.cpp
-        ${CMAKE_SOURCE_DIR}/devourer/src/crypto/Sha1Hmac.h
-        ${CMAKE_SOURCE_DIR}/devourer/src/crypto/AesCcm.cpp
-        ${CMAKE_SOURCE_DIR}/devourer/src/crypto/AesCcm.h
-        ${CMAKE_SOURCE_DIR}/devourer/src/registry_priv.h)
-set_target_properties(devourer PROPERTIES INTERFACE_INCLUDE_DIRECTORIES ${CMAKE_SOURCE_DIR}/devourer)
-
-
-target_include_directories(devourer PUBLIC ${CMAKE_SOURCE_DIR}/devourer)
-target_include_directories(devourer PUBLIC ${CMAKE_SOURCE_DIR}/devourer/hal)
-target_include_directories(devourer PUBLIC ${CMAKE_SOURCE_DIR}/devourer/hal/phydm/rtl8814a)
-target_include_directories(devourer PUBLIC ${CMAKE_SOURCE_DIR}/devourer/src)
-set_property(TARGET devourer PROPERTY CXX_STANDARD 20)
-
-# WFB-NG RTL8812 library
+# --- the .so: driver + Station L2 + crypto + APFPV layer + wfb logic + JNI --
 add_library(${CMAKE_PROJECT_NAME} SHARED
-        RxFrame.h
-        RxFrame.cpp
-        WfbngLink.cpp
-        TxFrame.h
-        TxFrame.cpp
-        SignalQualityCalculator.h
-        SignalQualityCalculator.cpp
-        apfpv_jni.cpp
-        )
+        ${WD_HAL}
+        ${WD_SRC}
+        ${DV}/src/ApfpvStation.cpp
+        ${DV}/src/ApfpvDhcp.cpp
+        ${DV}/src/RxDeframe.cpp
+        ${DV}/src/LqFeedback.cpp
+        ${DV}/src/Wpa2Authenticator.cpp
+        ${WD}/wfb/RxFrame.cpp
+        ${WD}/wfb/TxFrame.cpp
+        ${WD}/wfb/SignalQualityCalculator.cpp
+        ${DV}/jni/apfpv_jni.cpp
+        ${DV}/jni/WfbngLink.cpp)
 
+set_property(TARGET ${CMAKE_PROJECT_NAME} PROPERTY CXX_STANDARD 20)
+target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE -fno-omit-frame-pointer)
 target_link_libraries(${CMAKE_PROJECT_NAME}
-        devourer
         wfb-ng
         android
         log
         ${CMAKE_SOURCE_DIR}/libs/${ANDROID_ABI}/libusb1.0.so
         ${CMAKE_SOURCE_DIR}/libs/${ANDROID_ABI}/libsodium.so
         ${CMAKE_SOURCE_DIR}/libs/${ANDROID_ABI}/libpcap.a)
-
-set_property(TARGET ${CMAKE_PROJECT_NAME} PROPERTY CXX_STANDARD 20)
-target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE -fno-omit-frame-pointer )
