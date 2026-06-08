@@ -10,6 +10,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <chrono>
 #include <atomic>
 #include <android/log.h>
 #include <sys/socket.h>
@@ -43,6 +44,10 @@ struct StaCtx {
     // complete -> the auth never radiates.
     std::thread                   evtThread;
     std::atomic<bool>             evtRun{false};
+    // Set true while RX is paused/draining for a cal/TX so the event thread yields
+    // instead of contending the event lock with the cal's synchronous control reads
+    // (daemon-vs-direct-call serialization; critical here since tv=100ms locks long).
+    std::shared_ptr<std::atomic<bool>> rxQuiesce = std::make_shared<std::atomic<bool>>(false);
 };
 
 // Forward state to Java (onNativeState). The state callback can fire either on
@@ -110,11 +115,18 @@ static bool ensureStation(StaCtx* ctx) {
         ctx->station = std::make_unique<ApfpvStation>(
             &ctx->rtl->adapter(), &ctx->rtl->radioManager(), onRtp, onState);
         ctx->station->setDevice(ctx->rtl.get());
+        ctx->rtl->adapter().setQuiesceFlag(ctx->rxQuiesce);  // event thread yields during cal
         // Start the libusb event loop (drives async RX URBs + async TX).
         if (!ctx->evtRun.load()) {
             ctx->evtRun.store(true);
             ctx->evtThread = std::thread([ctx]() {
                 while (ctx->evtRun.load()) {
+                    // Yield while a cal/TX has RX paused so we don't hold the event lock
+                    // against its synchronous control reads (serialization fix).
+                    if (ctx->rxQuiesce->load(std::memory_order_acquire)) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                        continue;
+                    }
                     struct timeval tv { 0, 100000 };
                     libusb_handle_events_timeout_completed(ctx->usb, &tv, nullptr);
                 }
@@ -149,7 +161,7 @@ Java_com_openipc_wfbngrtl8812_ApfpvStaLink_nativeStaInitialize(JNIEnv* env, jcla
 JNIEXPORT void JNICALL
 Java_com_openipc_wfbngrtl8812_ApfpvStaLink_nativeStaConnect(
         JNIEnv* env, jclass, jlong inst, jobject jlink, jint fd,
-        jint channel, jint bandwidth, jstring jssid, jstring jpass, jstring jbssid) {
+        jint channel, jint bandwidth, jstring jssid, jstring jpass, jstring jbssid, jstring jStaticIp) {
     auto* ctx = reinterpret_cast<StaCtx*>(inst);
     if (!ctx) return;
     if (!ctx->jlink) ctx->jlink = env->NewGlobalRef(jlink);
@@ -188,6 +200,14 @@ Java_com_openipc_wfbngrtl8812_ApfpvStaLink_nativeStaConnect(
                 for (int i = 0; i < 6; ++i) p.bssid[i] = (uint8_t)b[i];
                 p.haveBssid = true; p.scan = false;
             }
+        }
+        // Static-IP mode: a non-empty "a.b.c.d" from JNI -> SKIP DHCP and bind it; empty/null -> DHCP.
+        if (jStaticIp) {
+            const char* sip = env->GetStringUTFChars(jStaticIp, nullptr);
+            unsigned a,b,c,d;
+            if (sip && sscanf(sip, "%u.%u.%u.%u", &a,&b,&c,&d) == 4)
+                p.staticIp = ((uint32_t)a<<24)|((uint32_t)b<<16)|((uint32_t)c<<8)|(uint32_t)d;
+            if (sip) env->ReleaseStringUTFChars(jStaticIp, sip);
         }
         ctx->station->connect(p);     // runs the gated chain; states -> Java
     } catch (const std::exception& e) {

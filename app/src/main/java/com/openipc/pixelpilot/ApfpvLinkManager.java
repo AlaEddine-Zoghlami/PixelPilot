@@ -42,6 +42,7 @@ public class ApfpvLinkManager {
     private int     bandWidth   = 20;        // 20 MHz = full 200 mW under PSD cap
     private String  ssid        = "OpenIPC";
     private String  passphrase  = "12345678";
+    private String  staticIp    = "";        // "a.b.c.d" = bind that fixed IP (skip DHCP); "" = DHCP
 
     private final Map<String, UsbDevice> activeAdapters = new HashMap<>();
 
@@ -74,6 +75,8 @@ public class ApfpvLinkManager {
     public void setChannel(int ch)        { this.wifiChannel = ch; }
     public void setBandwidth(int bw)      { this.bandWidth = bw; }
     public void setCredentials(String s, String p) { this.ssid = s; this.passphrase = p; }
+    /** "a.b.c.d" = bind that fixed IP (skip DHCP); "" / null = DHCP (default). */
+    public void setStaticIp(String ip) { this.staticIp = (ip == null ? "" : ip); }
 
     private android.hardware.usb.UsbManager usbManager;
     private com.openipc.pixelpilot.apfpv.WlxAdapters wlx;
@@ -248,10 +251,10 @@ public class ApfpvLinkManager {
         Telemetry.event("apfpv_resolve", "bssid", bssid.isEmpty() ? "none" : bssid, "ch", String.valueOf(resolvedCh));
         final long handle = staLink.handle();
         final int fdF = fd, chF = wifiChannel, bwF = bandWidth;
-        final String ssidF = ssid, passF = passphrase, bssidF = bssid;
+        final String ssidF = ssid, passF = passphrase, bssidF = bssid, staticIpF = staticIp;
         new Thread(() -> {
             // State callbacks drive the UI; STREAMING => video on 5600.
-            ApfpvStaLink.nativeStaConnect(handle, staLink, fdF, chF, bwF, ssidF, passF, bssidF);
+            ApfpvStaLink.nativeStaConnect(handle, staLink, fdF, chF, bwF, ssidF, passF, bssidF, staticIpF);
             // Turn on dongle-RSSI -> VTX:12345 feedback (better than stock phone-APFPV)
             ApfpvStaLink.nativeStaSetLqFeedback(handle, true);
         }, "apfpv-connect").start();

@@ -82,7 +82,8 @@ public class ApfpvStaLink {
     public static native long nativeStaInitialize(Context context);
 
     // bssid: "aa:bb:cc:dd:ee:ff" (phone-resolved) -> skip the dongle sweep; "" -> sweep.
-    public static native void nativeStaConnect(long inst, ApfpvStaLink link, int fd, int channel, int bandwidth, String ssid, String pass, String bssid);
+    // staticIp: "a.b.c.d" -> SKIP DHCP and bind that fixed IP; "" / null -> use DHCP.
+    public static native void nativeStaConnect(long inst, ApfpvStaLink link, int fd, int channel, int bandwidth, String ssid, String pass, String bssid, String staticIp);
 
     public static native void nativeStaDisconnect(long inst, int fd);
 
@@ -144,10 +145,15 @@ public class ApfpvStaLink {
     }
 
     private int currentFd = -1;
-    /** Instance wrapper: associate this dongle (fd) to the AP in station mode. */
+    /** Instance wrapper: associate this dongle (fd) to the AP in station mode (DHCP). */
     public void connect(int fd, int channel, int bandwidth, String ssid, String pass, String bssid) {
+        connect(fd, channel, bandwidth, ssid, pass, bssid, "");   // "" = DHCP
+    }
+    /** Same, but staticIp "a.b.c.d" SKIPS DHCP and binds that fixed IP; "" / null = DHCP. */
+    public void connect(int fd, int channel, int bandwidth, String ssid, String pass, String bssid, String staticIp) {
         this.currentFd = fd;
-        nativeStaConnect(nativeStaLink, this, fd, channel, bandwidth, ssid, pass, bssid == null ? "" : bssid);
+        nativeStaConnect(nativeStaLink, this, fd, channel, bandwidth, ssid, pass,
+                         bssid == null ? "" : bssid, staticIp == null ? "" : staticIp);
     }
     /** Instance wrapper: tear down the station link. */
     public void disconnect() {
