@@ -1,5 +1,6 @@
 package com.openipc.videonative;
 
+import android.graphics.Bitmap;
 import android.graphics.SurfaceTexture;
 import android.os.Handler;
 import android.os.HandlerThread;
@@ -79,6 +80,15 @@ public class GLFanoutManager implements SurfaceTexture.OnFrameAvailableListener 
         });
     }
 
+    /** Upload the captured OSD layer (an RGBA_8888 Bitmap of the overlay View) to the GPU so the
+     *  DVR pass blends it. Call when the OSD changes; the upload runs on the GL thread, so the
+     *  caller must keep the Bitmap valid (not recycle it) until this returns control. */
+    public void updateOsd(final Bitmap osd) {
+        if (glHandler != null && osd != null) glHandler.post(() -> {
+            if (nativeHandle != 0) nativeUpdateOsd(nativeHandle, osd);
+        });
+    }
+
     @Override
     public void onFrameAvailable(SurfaceTexture st) {   // runs on the GL thread (glHandler)
         if (nativeHandle == 0) return;
@@ -107,6 +117,7 @@ public class GLFanoutManager implements SurfaceTexture.OnFrameAvailableListener 
     private native int  nativeOesTexture(long handle);
     private native void nativeSetEncoderSurface(long handle, Surface encoderSurface);
     private native void nativeSetRecordOsd(long handle, boolean on);
+    private native void nativeUpdateOsd(long handle, Bitmap osd);
     private native void nativeRenderFrame(long handle, float[] texMatrix);
     private native void nativeRelease(long handle);
 }

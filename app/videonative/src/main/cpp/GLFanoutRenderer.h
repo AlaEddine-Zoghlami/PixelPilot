@@ -66,7 +66,22 @@ class GLFanoutRenderer
     }
 
     void setRecordOsd(bool on) { recordOsd_.store(on); }
-    void setOsdTexture(GLuint tex) { osdTex_ = tex; }   // RGBA texture of the OSD layer
+    // Upload the OSD overlay (RGBA pixels captured from the OSD View) into the 2D texture the
+    // DVR pass alpha-blends. Lazy-creates the texture. MUST run on the GL-context thread.
+    void updateOsd(const void* rgba, int w, int h)
+    {
+        if (osdTex_ == 0) {
+            glGenTextures(1, &osdTex_);
+            glBindTexture(GL_TEXTURE_2D, osdTex_);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        } else {
+            glBindTexture(GL_TEXTURE_2D, osdTex_);
+        }
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    }
 
     // Per decoded frame (after SurfaceTexture.updateTexImage on the JNI side fills oesTex_).
     // MUST run on the thread owning ctx_. texMatrix = the SurfaceTexture transform.

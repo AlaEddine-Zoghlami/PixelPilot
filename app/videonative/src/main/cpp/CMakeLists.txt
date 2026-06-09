@@ -23,6 +23,7 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
         aaudio
         EGL
         GLESv2
+        jnigraphics
         ${CMAKE_SOURCE_DIR}/libs/${ANDROID_ABI}/libopus.so
         log)
 
