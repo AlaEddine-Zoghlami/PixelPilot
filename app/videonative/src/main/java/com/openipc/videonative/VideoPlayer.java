@@ -160,20 +160,19 @@ public class VideoPlayer implements IVideoParamsChanged {
      *
      * @return Callback that should be added to SurfaceView.Holder
      */
-    // GL fan-out is WIP: the repoint (decoder -> SurfaceTexture) stalls the codec on-device
-    // because the GL loop isn't draining the SurfaceTexture, so output backs up and the decoder
-    // starves (dequeueInputBuffer -10000). OFF by default -> decode renders straight to the
-    // SurfaceView (proven path). Flip to true only with on-device GL-loop debugging.
-    private static final boolean GL_FANOUT_ENABLED = false;
+    // GL fan-out (decoder -> SurfaceTexture -> GL -> display + DVR). VERIFIED on-device with the
+    // H.265 stream: the decoder renders into the SurfaceTexture at full rate (renderFps=120, no
+    // stall), so the GL loop drains it correctly. An earlier apparent "stall" was an H.264 codec
+    // mismatch (it stalled with the fan-out OFF too), not the fan-out. Kept behind a kill-switch.
+    private static final boolean GL_FANOUT_ENABLED = true;
     private GLFanoutManager glFanout;
 
     public SurfaceHolder.Callback configure1(int index) {
         return new SurfaceHolder.Callback() {
             @Override
             public void surfaceCreated(SurfaceHolder holder) {
-                // GL fan-out (decoder -> SurfaceTexture -> GL -> display + DVR): WIP, gated by
-                // GL_FANOUT_ENABLED (off — it stalls the decoder on-device). When off the decoder
-                // renders straight to the SurfaceView (the proven path).
+                // GL fan-out (decoder -> SurfaceTexture -> GL -> display + DVR), gated by
+                // GL_FANOUT_ENABLED. When off, the decoder renders straight to the SurfaceView.
                 if (GL_FANOUT_ENABLED) {
                     GLFanoutManager fanout = new GLFanoutManager();
                     if (fanout.init(holder.getSurface())) {
