@@ -182,11 +182,23 @@ void VideoPlayer::onNewNALU(const NALU& nalu)
     {
         return;
     }
-    // Copy data to write if from a different thread.
-    uint8_t* m_data_copy = new uint8_t[nalu.getSize()];
-    memcpy(m_data_copy, nalu.getData(), nalu.getSize());
-    NALU nalu_(m_data_copy, nalu.getSize(), nalu.IS_H265_PACKET);
-    enqueueNALU(nalu_);
+    // Decoded-stream DVR: re-encode the DECODED frames (always complete) instead of
+    // muxing the raw, possibly-torn wire NALUs. The transcoder decodes -> re-encodes;
+    // its callback enqueues clean NALUs to the SAME minimp4 writer (processQueue).
+    if (!dvrTranscoder.isRunning() && latestVideoRatio.width > 0)
+    {
+        dvrTranscoder.start(latestVideoRatio.width, latestVideoRatio.height, nalu.IS_H265_PACKET,
+                            (int) latestDecodingInfo.currentFPS, 8000000, nullptr, 0,
+                            [this](const uint8_t* d, size_t s, bool h265)
+                            {
+                                uint8_t* cpy = new uint8_t[s];
+                                memcpy(cpy, d, s);
+                                NALU n(cpy, s, h265);
+                                enqueueNALU(n);
+                            },
+                            nalu.IS_H265_PACKET);
+    }
+    dvrTranscoder.feedNALU(nalu);  // no-op until the transcoder is up; never touches the live decode
 }
 
 void VideoPlayer::setVideoSurface(JNIEnv* env, jobject surface, jint i)
@@ -285,6 +297,7 @@ void VideoPlayer::startDvr(JNIEnv* env, jint fd, jint dvr_fmp4_enabled)
 void VideoPlayer::stopDvr()
 {
     __android_log_print(ANDROID_LOG_DEBUG, TAG, "Stop dvr");
+    dvrTranscoder.stop();
     stopProcessing();
 }
 

@@ -341,6 +341,14 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         // Seamless switch coordinator (mirrors VRX rx_mode logic), now 3-way.
         linkModeCoordinator = new LinkModeCoordinator(this, binding,
                 wfbLinkManager, apfpvLinkManager, apfpvWifiManager, linkMode);
+        // Mode-agnostic USB hotplug: a physical dongle remove/insert reconnects the CURRENT
+        // dongle mode (APFPV/WFB). Fired by WfbLinkManager.onReceive on any USB attach/detach/perm.
+        wfbLinkManager.onUsbHotplug = () ->
+            linkModeCoordinator.onUsbHotplug((m, ok, detail) ->
+                runOnUiThread(() -> {
+                    this.linkMode = m;
+                    Toast.makeText(this, detail, Toast.LENGTH_SHORT).show();
+                }));
     }
 
     /**
@@ -2061,14 +2069,17 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
             if (decodingInfo.currentFPS > 0) {
                 binding.tvMessage.setVisibility(View.GONE);
                 binding.wifiMessage.setVisibility(View.GONE);
+                binding.itemVideoStats.setVisibility(View.VISIBLE);   // on-device decode-stats overlay (also in APFPV mode)
             }
+            float dropPct = decodingInfo.nNALU > 0
+                    ? 100f * (decodingInfo.nNALU - decodingInfo.nNALUSFeeded) / decodingInfo.nNALU : 0f;
             String info = "%dx%d@%.0f " + (decodingInfo.nCodec == 1 ? " H265 " : " H264 ")
                     + (decodingInfo.currentKiloBitsPerSecond > 1000 ? " %.1fMbps " : " %.1fKpbs ")
-                    + " %.1fms";
+                    + " %.1fms  drop %.1f%%";
             binding.tvVideoStats.setText(String.format(Locale.US, info,
                     lastVideoW, lastVideoH, decodingInfo.currentFPS,
                     decodingInfo.currentKiloBitsPerSecond / 1000,
-                    decodingInfo.avgTotalDecodingTime_ms));
+                    decodingInfo.avgTotalDecodingTime_ms, dropPct));
         });
     }
 

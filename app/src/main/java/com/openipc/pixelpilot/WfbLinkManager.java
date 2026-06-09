@@ -21,6 +21,10 @@ public class WfbLinkManager extends BroadcastReceiver {
     public static final String ACTION_USB_PERMISSION = "com.openipc.pixelpilot.USB_PERMISSION";
     private static final String TAG = "pixelpilot";
     static Map<String, UsbDevice> activeWifiAdapters = new HashMap<>();
+
+    // Mode-agnostic USB hotplug hook: fired on any dongle attach/detach/permission so the
+    // LinkModeCoordinator can reconnect the CURRENT mode (incl. APFPV, which refreshAdapters skips).
+    public Runnable onUsbHotplug;
     private final WfbNgLink wfbLink;
     private final ActivityVideoBinding binding;
     private final Context context;
@@ -84,14 +88,16 @@ public class WfbLinkManager extends BroadcastReceiver {
             }
             Log.d(TAG, "usb device detached: " + dev.getVendorId() + "/" + dev.getProductId());
             refreshAdapters();
+            if (onUsbHotplug != null) onUsbHotplug.run();   // mode-agnostic: also tears down APFPV dongle
         } else if (android.hardware.usb.UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(intent.getAction())) {
             if (dev == null) {
                 return;
             }
             Log.d(TAG, "usb device attached: " + dev.getVendorId() + "/" + dev.getProductId());
-            // No need to refresh since this should trigger a call to VideoActivity.onReceive();
+            if (onUsbHotplug != null) onUsbHotplug.run();   // re-init the dongle for the CURRENT mode
         } else if (ACTION_USB_PERMISSION.equals(intent.getAction())) {
             Log.d(TAG, "Permission handled");
+            if (onUsbHotplug != null) onUsbHotplug.run();   // permission granted -> (re)start adapter
         }
     }
 

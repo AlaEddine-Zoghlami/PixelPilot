@@ -92,11 +92,26 @@ public class ApfpvWifiManager {
      */
     public synchronized void start() {
         if (running) return;
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-            emitError("phone-Wi-Fi APFPV needs Android 10+ (WifiNetworkSpecifier)");
+        running = true;
+        // If the phone is ALREADY on Wi-Fi (the bench/home AP, or the VTX AP joined
+        // from system settings), do NOT force a new association — bind this process to
+        // the current Wi-Fi so the RTP provider's stream reaches the existing :5600
+        // UDP socket. Identical data path to the dongle (plain UDP video), no re-join.
+        Network cur = currentWifiNetwork();
+        if (cur != null) {
+            boundNetwork = cur;
+            try { cm.bindProcessToNetwork(cur); } catch (Exception ignored) {}
+            emitState((looksLikeApfpv(cur) ? "APFPV on current Wi-Fi (VTX 192.168.0.1)"
+                                           : "using current Wi-Fi") + " — listening for RTP on :5600");
+            startRssiLoop();
+            startLqLoop();
             return;
         }
-        running = true;
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            emitError("phone-Wi-Fi APFPV needs Android 10+ (WifiNetworkSpecifier)");
+            running = false;
+            return;
+        }
         emitState("requesting Wi-Fi association to " + ssid);
 
         WifiNetworkSpecifier spec = new WifiNetworkSpecifier.Builder()
@@ -171,6 +186,17 @@ public class ApfpvWifiManager {
             }
         } catch (Exception ignored) {}
         return false;
+    }
+
+    /** The currently-active Wi-Fi network, or null if the phone isn't on Wi-Fi. */
+    private Network currentWifiNetwork() {
+        try {
+            for (Network n : cm.getAllNetworks()) {
+                NetworkCapabilities c = cm.getNetworkCapabilities(n);
+                if (c != null && c.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return n;
+            }
+        } catch (Exception ignored) {}
+        return null;
     }
 
     /** Current Wi-Fi RSSI in dBm, or -127 if unavailable. */

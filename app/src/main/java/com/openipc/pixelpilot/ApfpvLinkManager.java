@@ -245,6 +245,19 @@ public class ApfpvLinkManager {
                     if (ageMs >= 0 && ageMs < 20000) { bssid = r.BSSID; resolvedCh = freqToChannel(r.frequency); }
                     break;
                 }
+                // Fallback for a FAST RE-INSERT (no fresh scan yet -> native sweep misses ->
+                // FAIL_NO_AP "not in range"): the phone ITSELF is associated to the AP, so arm
+                // the dongle straight to the phone's live connection BSSID/channel.
+                if (bssid.isEmpty()) {
+                    try {
+                        android.net.wifi.WifiInfo wi = wm.getConnectionInfo();
+                        if (wi != null && wi.getBSSID() != null && wi.getSSID() != null
+                                && ssid.equals(wi.getSSID().replace("\"", ""))) {
+                            bssid = wi.getBSSID();
+                            resolvedCh = freqToChannel(wi.getFrequency());
+                        }
+                    } catch (Exception ignored) {}
+                }
             }
         } catch (Exception ignored) {}
         if (!bssid.isEmpty()) wifiChannel = resolvedCh;   // else: native does the live sweep

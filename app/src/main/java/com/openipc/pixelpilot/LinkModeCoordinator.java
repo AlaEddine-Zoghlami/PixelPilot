@@ -1,6 +1,8 @@
 package com.openipc.pixelpilot;
 
+import android.app.PendingIntent;
 import android.content.Context;
+import android.content.Intent;
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbManager;
 
@@ -84,6 +86,16 @@ public class LinkModeCoordinator {
             case APFPV:      apfpv.stopAdapters(); break;
             case APFPV_WIFI: if (apfpvWifi != null) apfpvWifi.stop(); break;
         }
+        // Defensive: a DONGLE transport must NEVER have the phone-Wi-Fi network binding
+        // active. apfpvWifi.start() calls cm.bindProcessToNetwork(wifi), which pins this
+        // process's 5600 UDP socket to the phone Wi-Fi — so the dongle's stream never
+        // reaches the receiver and video is BLACK. Always tear down phone-Wi-Fi (it is
+        // idempotent and clears bindProcessToNetwork(null)) when entering APFPV/WFB dongle
+        // mode, even if the coordinator didn't think APFPV_WIFI was current (the binding
+        // can leak across cold-start / non-switch paths).
+        if ((target == Mode.APFPV || target == Mode.WFB) && apfpvWifi != null) {
+            apfpvWifi.stop();
+        }
 
         // 2. Persist the new mode (cold start comes up in the right mode).
         String modeStr = target == Mode.APFPV ? "apfpv"
@@ -135,5 +147,47 @@ public class LinkModeCoordinator {
             }
         }
         return false;
+    }
+
+    /**
+     * USB hotplug for DONGLE modes — call on ACTION_USB_DEVICE_ATTACHED/DETACHED.
+     * On physical removal the active adapter is torn down (the libusb fd is gone); on
+     * re-insert we re-acquire USB permission and restart the adapter, which re-runs
+     * scan/auth/assoc/4-way back to streaming. No-op in phone-Wi-Fi mode (no dongle).
+     * The library's own RX-timeout supervisor handles out-of-range/link-loss; THIS
+     * handles the dongle hardware physically coming and going.
+     */
+    public synchronized void onUsbHotplug(ModeChangeListener cb) {
+        if (current == Mode.APFPV_WIFI || usbManager == null) return;
+        UsbDevice dongle = null;
+        for (UsbDevice dev : usbManager.getDeviceList().values()) {
+            if (dev.getVendorId() == 0x0bda) { dongle = dev; break; }   // Realtek RTL8812AU family
+        }
+        if (dongle == null) {
+            // Physically removed -> tear down the active adapter and wait for re-insert.
+            Telemetry.event("usb_dongle_removed", "mode", current.name());
+            if (current == Mode.APFPV) apfpv.stopAdapters(); else wfb.stopAdapters();
+            if (cb != null) cb.onModeChanged(current, false, "dongle removed — re-insert to reconnect");
+            return;
+        }
+        // Present: ensure USB permission (re-granted per attach), then (re)start.
+        if (!usbManager.hasPermission(dongle)) {
+            PendingIntent pi = PendingIntent.getBroadcast(context, 0,
+                new Intent(WfbLinkManager.ACTION_USB_PERMISSION), PendingIntent.FLAG_IMMUTABLE);
+            usbManager.requestPermission(dongle, pi);
+            return;   // permission grant triggers another hotplug pass
+        }
+        Telemetry.event("usb_dongle_reattach", "mode", current.name());
+        // CRITICAL: stop the previous station FIRST. A re-inserted dongle is a NEW fd, but
+        // the old station's supervisor may still be spinning on the dead fd — and
+        // ApfpvStation::connect() only (re)starts the supervisor when _run is clear
+        // (`autoReconnect && !_run.exchange(true)`). Without this stop, the fresh connect
+        // never gets a supervisor and stays stuck on FAIL_NO_AP ("not in range"). stop()
+        // clears _run so the new startAdapter() spins up a fresh, retrying supervisor.
+        if (current == Mode.APFPV) apfpv.stopAdapters(); else wfb.stopAdapters();
+        boolean ok = (current == Mode.APFPV)
+                ? Boolean.TRUE.equals(apfpv.startAdapter(dongle))
+                : Boolean.TRUE.equals(wfb.startAdapter(dongle));
+        if (cb != null) cb.onModeChanged(current, ok, ok ? "dongle reconnected" : "dongle re-init failed");
     }
 }

@@ -10,3 +10,10 @@
 # and don't strip custom exception types.
 -keepattributes SourceFile,LineNumberTable
 -keep public class * extends java.lang.Exception
+
+# APFPV/WFB station: onNativeState/onNativeRssi/onNativeScanResult are invoked ONLY from
+# native (reverse-JNI, no Java caller), so R8 strips them in release -> native GetMethodID
+# throws NoSuchMethodError and aborts at connect. The `native <methods>` rule above keeps
+# the native entrypoints but NOT these callbacks. Keep the whole link classes.
+-keep class com.openipc.wfbngrtl8812.ApfpvStaLink { *; }
+-keep class com.openipc.wfbngrtl8812.WfbNgLink { *; }

@@ -21,13 +21,17 @@ public class ApfpvSettings {
     // ---- GS APFPV connection (set gs apfpv ssid/password; multi-card wlx) ---
     public String  ssid       = "OpenIPC";
     public String  password   = "12345678";
-    public int     channel    = 40;       // legal 5.2 GHz UNII-1 default (DE)
+    public int     channel    = 44;       // test AP channel (set per-AP)
     public int     bandwidth  = 20;       // 20 MHz = full 200 mW under PSD cap
 
     // Multi-adapter: the VRX picks the best wlx card via ip-route; on the phone
     // we may have 1 (the AU). Kept for parity/future dual-dongle diversity.
     public boolean lqFeedbackEnabled = true;   // dongle RSSI -> VTX:12345
     public boolean staticIp          = false;  // else minimal DHCP (.10)
+    public boolean fec               = true;   // FEC loss-recovery on the RTP path, default ON,
+                                               // user-disablable. NOTE: only recovers packets once a
+                                               // FEC *sender* exists (VTX/relay must transmit parity);
+                                               // APFPV is raw RTP today. WFB-ng mode already has FEC.
 
     // ---- AIR aalink knobs (set air aalink ...; via VTX WebUI HTTP) ----------
     // Exactly the keys gsmenu exposes under "values air aalink ...".
@@ -47,7 +51,7 @@ public class ApfpvSettings {
     public boolean showSignalBars    = true;
 
     // ---- GS system (set gs system ...) -------------------------------------
-    public String  resolution        = "1280x720@90";
+    public String  resolution        = "1280x720@120";
     public int     recFps            = 60;
     public boolean recEnabled        = false;
     public String  gsRendering       = "hardware";

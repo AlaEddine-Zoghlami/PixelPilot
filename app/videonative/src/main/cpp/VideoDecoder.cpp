@@ -4,6 +4,7 @@
 
 #include "VideoDecoder.h"
 #include <unistd.h>
+#include <sys/system_properties.h>
 #include <sstream>
 #include "AndroidThreadPrioValues.hpp"
 #include "helper/AndroidMediaFormatHelper.h"
@@ -131,6 +132,29 @@ void VideoDecoder::configureStartDecoder(int idx)
     if (decoder.window[idx] == nullptr) return;
     const std::string MIME = IS_H265 ? "video/hevc" : "video/avc";
     decoder.codec[idx]     = AMediaCodec_createDecoderByType(MIME.c_str());
+
+    // WORKAROUND (MediaTek Dimensity, Android 15/16): the MTK HEVC HW decoder configures and
+    // reports NO error but renders a BLACK surface (audio fine) — androidx/media #2711/#2765.
+    // Detect MediaTek (ro.board.platform starts with "mt") on Android 15+ (api>=35) and force
+    // the SOFTWARE HEVC decoder (c2.android.hevc.decoder), which renders. Uses system properties
+    // rather than the API-28 AMediaCodec_getName (the NDK native API level doesn't follow gradle
+    // minSdk without a CMake reconfigure). api>=35 spares older MediaTek where HEVC HW works.
+    if (IS_H265 && decoder.codec[idx] != nullptr)
+    {
+        char platform[PROP_VALUE_MAX] = {0};
+        char sdkStr[PROP_VALUE_MAX]   = {0};
+        __system_property_get("ro.board.platform", platform);
+        __system_property_get("ro.build.version.sdk", sdkStr);
+        std::string plat(platform);
+        if (plat.rfind("mt", 0) == 0 && atoi(sdkStr) >= 35)
+        {
+            __android_log_print(ANDROID_LOG_WARN, "VideoDecoder",
+                "MediaTek SoC '%s' HEVC HW decoder renders black -> forcing SW c2.android.hevc.decoder", plat.c_str());
+            AMediaCodec_delete(decoder.codec[idx]);
+            AMediaCodec* sw = AMediaCodec_createCodecByName("c2.android.hevc.decoder");
+            decoder.codec[idx] = (sw != nullptr) ? sw : AMediaCodec_createDecoderByType(MIME.c_str());
+        }
+    }
 
     AMediaFormat* format = AMediaFormat_new();
     AMediaFormat_setString(format, AMEDIAFORMAT_KEY_MIME, MIME.c_str());

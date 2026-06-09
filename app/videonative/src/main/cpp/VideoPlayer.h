@@ -15,6 +15,7 @@
 #include "UdpReceiver.h"
 #include "UdsReceiver.h"
 #include "VideoDecoder.h"
+#include "DvrTranscoder.h"
 #include "minimp4.h"
 #include "parser/H26XParser.h"
 #include "time_util.h"
@@ -82,6 +83,7 @@ class VideoPlayer
     std::thread             processingThread;
     int                     dvr_mp4_fragmentation = 0;
     uint64_t                last_dvr_write        = 0;
+    DvrTranscoder           dvrTranscoder;   // re-encodes decoded frames -> clean DVR
 
     // Opus audio captured for the DVR recording, muxed into the same .mp4 as the video.
     struct AudioRecPacket
