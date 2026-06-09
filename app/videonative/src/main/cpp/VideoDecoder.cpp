@@ -133,6 +133,31 @@ void VideoDecoder::configureStartDecoder(int idx)
     const std::string MIME = IS_H265 ? "video/hevc" : "video/avc";
     decoder.codec[idx]     = AMediaCodec_createDecoderByType(MIME.c_str());
 
+    // WORKAROUND (Android Emulator / device with no real hardware video decoder): the emulator's
+    // "goldfish" H.264/HEVC decoder is unreliable — it FREEZES on Android 14 (stuck ~frame 1321)
+    // and renders GARBAGE on Android 10, even with lossless input (verified: 500 kbps single-slice
+    // stream, ~1% loss, whole-frame corruption). Real hardware decoders are fine. So only when the
+    // device has no hardware decode (an emulator: ro.boot.qemu=1 / ro.hardware=goldfish|ranchu),
+    // force the pure-software Google decoder (c2.android.{avc,hevc}.decoder), which decodes cleanly.
+    if (decoder.codec[idx] != nullptr)
+    {
+        char qemu[PROP_VALUE_MAX] = {0};
+        char hw[PROP_VALUE_MAX]   = {0};
+        __system_property_get("ro.boot.qemu", qemu);
+        __system_property_get("ro.hardware", hw);
+        std::string h(hw);
+        const bool noHwDecode = (qemu[0] == '1') || h == "goldfish" || h == "ranchu";
+        if (noHwDecode)
+        {
+            const char* swName = IS_H265 ? "c2.android.hevc.decoder" : "c2.android.avc.decoder";
+            __android_log_print(ANDROID_LOG_WARN, "VideoDecoder",
+                "No HW decoder (ro.hardware='%s') — goldfish decoder is unreliable; forcing SW %s", hw, swName);
+            AMediaCodec_delete(decoder.codec[idx]);
+            AMediaCodec* sw = AMediaCodec_createCodecByName(swName);
+            decoder.codec[idx] = (sw != nullptr) ? sw : AMediaCodec_createDecoderByType(MIME.c_str());
+        }
+    }
+
     // WORKAROUND (MediaTek Dimensity, Android 15/16): the MTK HEVC HW decoder configures and
     // reports NO error but renders a BLACK surface (audio fine) — androidx/media #2711/#2765.
     // Detect MediaTek (ro.board.platform starts with "mt") on Android 15+ (api>=35) and force
