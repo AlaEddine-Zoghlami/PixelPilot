@@ -160,22 +160,29 @@ public class VideoPlayer implements IVideoParamsChanged {
      *
      * @return Callback that should be added to SurfaceView.Holder
      */
+    // GL fan-out is WIP: the repoint (decoder -> SurfaceTexture) stalls the codec on-device
+    // because the GL loop isn't draining the SurfaceTexture, so output backs up and the decoder
+    // starves (dequeueInputBuffer -10000). OFF by default -> decode renders straight to the
+    // SurfaceView (proven path). Flip to true only with on-device GL-loop debugging.
+    private static final boolean GL_FANOUT_ENABLED = false;
     private GLFanoutManager glFanout;
 
     public SurfaceHolder.Callback configure1(int index) {
         return new SurfaceHolder.Callback() {
             @Override
             public void surfaceCreated(SurfaceHolder holder) {
-                // GL fan-out: render the decoder into a SurfaceTexture, then the GL pass fans it
-                // out to the display (this SurfaceView) + the DVR encoder. Falls back to the
-                // direct SurfaceView render if GL init fails, so behaviour is never worse.
-                GLFanoutManager fanout = new GLFanoutManager();
-                if (fanout.init(holder.getSurface())) {
-                    glFanout = fanout;
-                    addAndStartDecoderReceiver(fanout.inputSurface(), index);
-                } else {
-                    addAndStartDecoderReceiver(holder.getSurface(), index);
+                // GL fan-out (decoder -> SurfaceTexture -> GL -> display + DVR): WIP, gated by
+                // GL_FANOUT_ENABLED (off — it stalls the decoder on-device). When off the decoder
+                // renders straight to the SurfaceView (the proven path).
+                if (GL_FANOUT_ENABLED) {
+                    GLFanoutManager fanout = new GLFanoutManager();
+                    if (fanout.init(holder.getSurface())) {
+                        glFanout = fanout;
+                        addAndStartDecoderReceiver(fanout.inputSurface(), index);
+                        return;
+                    }
                 }
+                addAndStartDecoderReceiver(holder.getSurface(), index);
             }
 
             @Override
