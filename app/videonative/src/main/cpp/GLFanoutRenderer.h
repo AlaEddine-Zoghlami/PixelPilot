@@ -1,35 +1,16 @@
 //
 // GLFanoutRenderer.h — ONE decoded GS stream -> display + DVR (the "GL fan-out").
 //
-// WHY (user-specified design): instead of two decodes (one for the SurfaceView, one for
-// the DVR) or a screen-capture, the HW decoder renders ONCE into a SurfaceTexture, and a
-// GL pass fans that single frame out to BOTH the display Surface AND the DVR encoder's
-// input Surface. Four wins in one feature:
-//   1. PERF      — one decode shared between live view + recording.
-//   2. MTK RENDER— the MediaTek HEVC HW decoder renders BLACK to a *direct* SurfaceView but
-//                  correctly to a SurfaceTexture->GL path. So this lets us DROP the SW-HEVC
-//                  fallback in VideoDecoder.cpp (see that file's MediaTek workaround block).
-//   3. 10-BIT    — with HW decode restored, HEVC Main10 works for free (no SW penalty).
-//   4. OSD-DVR   — when recordOsd is on, the OSD layer is drawn as a texture in the GL pass
-//                  so the recording is video+overlay; off -> clean video.
+// The HW decoder renders ONCE into a SurfaceTexture; a GL pass fans that single frame out to
+// BOTH the display Surface AND the DVR encoder input Surface. Four wins: (1) PERF, one shared
+// decode; (2) MTK RENDER, the MediaTek HEVC HW decoder renders black to a *direct* SurfaceView
+// but correctly via SurfaceTexture->GL (-> drop the SW-HEVC fallback); (3) 10-BIT Main10 HW for
+// free; (4) OSD-composite DVR.
 //
-// PIPELINE:
-//   AMediaCodec decoder --(render=true)--> SurfaceTexture (OES external tex)
-//        GL pass (this class), per frame-available:
-//           updateTexImage()
-//           draw OES tex -> EGL window surface over the display SurfaceView   [eglSwapBuffers]
-//           if recording: draw OES tex (+ OSD tex if recordOsd) -> EGL surface
-//                         over the encoder input Surface                       [eglSwapBuffers]
-//   encoder output -> minimp4 (existing VideoPlayer DVR writer / OnEncodedNalu)
-//
-// STATUS: SCAFFOLD. EGL/GLES core below. INTEGRATION REMAINING (the invasive part, do in a
-// focused pass with build->flash->verify):
-//   (a) VideoDecoder: configure decoder output to THIS->inputSurface() instead of the
-//       SurfaceView's ANativeWindow (the one-line repoint that makes it a fan-out).
-//   (b) wire onFrameAvailable from the SurfaceTexture (JNI callback) -> renderFrame().
-//   (c) encoder + OSD-texture upload (reuse DvrTranscoder's encoder setup; OSD bitmap from
-//       the Java OSD layer via a shared texture).
-//   (d) after it renders on the Oppo, DELETE the MediaTek SW-HEVC fallback in VideoDecoder.cpp.
+// STATUS: EGL/GLES core + fullscreen-quad video render IMPLEMENTED (compiles). REMAINING
+// (invasive, device-verify): (a) repoint VideoDecoder output to GLFanoutManager.inputSurface();
+// (b) onFrameAvailable -> renderFrame() on the GL-context thread; (c) OSD-texture blend + encoder
+// reuse from DvrTranscoder; (d) verify render on Oppo then DELETE the MediaTek SW-HEVC fallback.
 //
 #ifndef PIXELPILOT_GLFANOUTRENDERER_H
 #define PIXELPILOT_GLFANOUTRENDERER_H
@@ -48,8 +29,6 @@ class GLFanoutRenderer
     GLFanoutRenderer() = default;
     ~GLFanoutRenderer() { release(); }
 
-    // Bind to the display SurfaceView's window. Creates the EGL context + the OES external
-    // texture the decoder will render into. Returns the GL texture id for the SurfaceTexture.
     bool initDisplay(ANativeWindow* displayWindow)
     {
         display_ = displayWindow;
@@ -68,14 +47,17 @@ class GLFanoutRenderer
         if (!eglMakeCurrent(egl_, dispSurf_, dispSurf_, ctx_)) return fail("eglMakeCurrent");
         if (!buildProgram()) return false;
         glGenTextures(1, &oesTex_);          // GL_TEXTURE_EXTERNAL_OES, fed by SurfaceTexture
+        glBindTexture(GL_TEXTURE_EXTERNAL_OES, oesTex_);
+        glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         ready_.store(true);
         return true;
     }
 
     GLuint oesTexture() const { return oesTex_; }
 
-    // The encoder's input Surface (from MediaCodec createInputSurface), so the recording
-    // shares the SAME decoded frame. Pass nullptr to stop recording.
     void setEncoderWindow(ANativeWindow* encWindow)
     {
         if (encSurf_ != EGL_NO_SURFACE) { eglDestroySurface(egl_, encSurf_); encSurf_ = EGL_NO_SURFACE; }
@@ -86,18 +68,20 @@ class GLFanoutRenderer
     void setRecordOsd(bool on) { recordOsd_.store(on); }
     void setOsdTexture(GLuint tex) { osdTex_ = tex; }   // RGBA texture of the OSD layer
 
-    // Called per decoded frame (after SurfaceTexture.updateTexImage on the Java/JNI side,
-    // which fills oesTex_). texMatrix = the 4x4 SurfaceTexture transform.
+    // Per decoded frame (after SurfaceTexture.updateTexImage on the JNI side fills oesTex_).
+    // MUST run on the thread owning ctx_. texMatrix = the SurfaceTexture transform.
     void renderFrame(const float texMatrix[16])
     {
         if (!ready_.load()) return;
-        // 1. Display.
         eglMakeCurrent(egl_, dispSurf_, dispSurf_, ctx_);
+        eglQuerySurface(egl_, dispSurf_, EGL_WIDTH, &vpW_);
+        eglQuerySurface(egl_, dispSurf_, EGL_HEIGHT, &vpH_);
         drawOes(texMatrix, /*withOsd=*/false);
         eglSwapBuffers(egl_, dispSurf_);
-        // 2. DVR encoder (if recording) — same frame, optional OSD composite.
         if (encSurf_ != EGL_NO_SURFACE) {
             eglMakeCurrent(egl_, encSurf_, encSurf_, ctx_);
+            eglQuerySurface(egl_, encSurf_, EGL_WIDTH, &vpW_);
+            eglQuerySurface(egl_, encSurf_, EGL_HEIGHT, &vpH_);
             drawOes(texMatrix, /*withOsd=*/recordOsd_.load());
             eglSwapBuffers(egl_, encSurf_);
         }
@@ -121,8 +105,6 @@ class GLFanoutRenderer
 
     bool buildProgram()
     {
-        // OES external-texture sampler (the SurfaceTexture format). TODO: blend osdTex_ on top
-        // when withOsd — a second textured quad with alpha. Scaffold draws the video only.
         static const char* VS =
             "attribute vec4 aPos; attribute vec2 aUV; uniform mat4 uTex;"
             "varying vec2 vUV; void main(){ vUV=(uTex*vec4(aUV,0.,1.)).xy; gl_Position=aPos; }";
@@ -131,7 +113,19 @@ class GLFanoutRenderer
             "precision mediump float; varying vec2 vUV; uniform samplerExternalOES uTexOes;"
             "void main(){ gl_FragColor = texture2D(uTexOes, vUV); }";
         prog_ = link(VS, FS);
-        return prog_ != 0;
+        if (!prog_) return fail("link program");
+        aPos_    = glGetAttribLocation(prog_, "aPos");
+        aUV_     = glGetAttribLocation(prog_, "aUV");
+        uTex_    = glGetUniformLocation(prog_, "uTex");
+        uTexOes_ = glGetUniformLocation(prog_, "uTexOes");
+        // Fullscreen quad (triangle strip): interleaved pos.xy, uv.xy.
+        static const float quad[] = {
+            -1.f, -1.f, 0.f, 0.f,   1.f, -1.f, 1.f, 0.f,
+            -1.f,  1.f, 0.f, 1.f,   1.f,  1.f, 1.f, 1.f};
+        glGenBuffers(1, &vbo_);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
+        return true;
     }
     GLuint link(const char* vs, const char* fs)
     {
@@ -139,17 +133,28 @@ class GLFanoutRenderer
         GLuint v=sh(GL_VERTEX_SHADER,vs), f=sh(GL_FRAGMENT_SHADER,fs), p=glCreateProgram();
         glAttachShader(p,v); glAttachShader(p,f); glLinkProgram(p);
         GLint ok=0; glGetProgramiv(p,GL_LINK_STATUS,&ok);
+        glDeleteShader(v); glDeleteShader(f);
         return ok ? p : 0;
     }
     void drawOes(const float texMatrix[16], bool withOsd)
     {
-        // Scaffold: full-screen quad sampling oesTex_ with texMatrix. The encoder + OSD-blend
-        // (withOsd) wiring is the integration step — see header TODOs.
+        glViewport(0, 0, vpW_, vpH_);
+        glClearColor(0.f, 0.f, 0.f, 1.f);
+        glClear(GL_COLOR_BUFFER_BIT);
         glUseProgram(prog_);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_EXTERNAL_OES, oesTex_);
-        glUniformMatrix4fv(glGetUniformLocation(prog_, "uTex"), 1, GL_FALSE, texMatrix);
-        // TODO: bind the fullscreen-quad VBO + draw; if withOsd, blend osdTex_ quad on top.
+        glUniform1i(uTexOes_, 0);
+        glUniformMatrix4fv(uTex_, 1, GL_FALSE, texMatrix);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+        glEnableVertexAttribArray(aPos_);
+        glVertexAttribPointer(aPos_, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*) 0);
+        glEnableVertexAttribArray(aUV_);
+        glVertexAttribPointer(aUV_, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*) (2 * sizeof(float)));
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        glDisableVertexAttribArray(aPos_);
+        glDisableVertexAttribArray(aUV_);
+        // TODO(OSD): if withOsd && osdTex_, draw osdTex_ as a 2nd alpha-blended quad on top.
         (void) withOsd;
     }
 
@@ -160,7 +165,9 @@ class GLFanoutRenderer
     EGLConfig  cfg_      = nullptr;
     EGLSurface dispSurf_ = EGL_NO_SURFACE;
     EGLSurface encSurf_  = EGL_NO_SURFACE;
-    GLuint     prog_ = 0, oesTex_ = 0, osdTex_ = 0;
+    GLuint     prog_ = 0, oesTex_ = 0, osdTex_ = 0, vbo_ = 0;
+    GLint      aPos_ = -1, aUV_ = -1, uTex_ = -1, uTexOes_ = -1;
+    EGLint     vpW_ = 0, vpH_ = 0;
     std::atomic<bool> ready_{false};
     std::atomic<bool> recordOsd_{false};
 };

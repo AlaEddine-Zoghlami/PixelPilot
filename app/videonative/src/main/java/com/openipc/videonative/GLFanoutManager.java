@@ -29,7 +29,7 @@ import android.view.Surface;
  */
 public class GLFanoutManager implements SurfaceTexture.OnFrameAvailableListener {
 
-    static { System.loadLibrary("videonative"); }   // same lib as VideoDecoder/VideoPlayer
+    static { System.loadLibrary("VideoNative"); }   // same lib as VideoDecoder/VideoPlayer
 
     private long           nativeHandle = 0;
     private SurfaceTexture surfaceTexture;
