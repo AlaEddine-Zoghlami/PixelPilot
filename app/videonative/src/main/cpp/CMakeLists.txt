@@ -12,7 +12,8 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         UdpReceiver.cpp
         UdsReceiver.cpp
         VideoDecoder.cpp
-        VideoPlayer.cpp)
+        VideoPlayer.cpp
+        GLFanoutJni.cpp)
 
 
 target_link_libraries(${CMAKE_PROJECT_NAME}
@@ -20,6 +21,8 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
         android
         mediandk
         aaudio
+        EGL
+        GLESv2
         ${CMAKE_SOURCE_DIR}/libs/${ANDROID_ABI}/libopus.so
         log)
 
