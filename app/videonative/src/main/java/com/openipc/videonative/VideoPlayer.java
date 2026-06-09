@@ -160,11 +160,22 @@ public class VideoPlayer implements IVideoParamsChanged {
      *
      * @return Callback that should be added to SurfaceView.Holder
      */
+    private GLFanoutManager glFanout;
+
     public SurfaceHolder.Callback configure1(int index) {
         return new SurfaceHolder.Callback() {
             @Override
             public void surfaceCreated(SurfaceHolder holder) {
-                addAndStartDecoderReceiver(holder.getSurface(), index);
+                // GL fan-out: render the decoder into a SurfaceTexture, then the GL pass fans it
+                // out to the display (this SurfaceView) + the DVR encoder. Falls back to the
+                // direct SurfaceView render if GL init fails, so behaviour is never worse.
+                GLFanoutManager fanout = new GLFanoutManager();
+                if (fanout.init(holder.getSurface())) {
+                    glFanout = fanout;
+                    addAndStartDecoderReceiver(fanout.inputSurface(), index);
+                } else {
+                    addAndStartDecoderReceiver(holder.getSurface(), index);
+                }
             }
 
             @Override
@@ -176,6 +187,7 @@ public class VideoPlayer implements IVideoParamsChanged {
             public void surfaceDestroyed(SurfaceHolder holder) {
                 Log.d(TAG, "surfaceDestroyed idx: " + index);
                 stopAndRemoveReceiverDecoder(index);
+                if (glFanout != null) { glFanout.release(); glFanout = null; }
             }
         };
     }
