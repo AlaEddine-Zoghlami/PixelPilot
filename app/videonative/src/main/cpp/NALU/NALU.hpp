@@ -296,9 +296,70 @@ class NALU
         }
         else
         {
-            // const auto sps=H264::SPS(getData(),getSize());
-            // return sps.getWidthHeightPx();
-            return {640, 480};
+            // Real H.264 SPS resolution parse (was hardcoded {640,480}, which mis-configured the
+            // decoder for every non-VGA H.264 stream -> corrupted render). Self-contained
+            // Exp-Golomb read of the SPS rbsp up to the frame dimensions; assumes 4:2:0 crop units.
+            const uint8_t* d = getDataWithoutPrefix();   // [0]=nal header (0x67), [1..]=rbsp
+            const int      n = (int) getSize() - get_nalu_prefix_size();
+            std::vector<uint8_t> rbsp;
+            rbsp.reserve(n > 0 ? n : 0);
+            for (int i = 1; i < n; i++)
+            {
+                if (i >= 3 && d[i] == 0x03 && d[i - 1] == 0x00 && d[i - 2] == 0x00) continue;  // de-emulate
+                rbsp.push_back(d[i]);
+            }
+            size_t bp = 0;
+            auto   u1 = [&]() -> uint32_t {
+                uint32_t b = (bp / 8 < rbsp.size()) ? ((rbsp[bp / 8] >> (7 - (bp & 7))) & 1u) : 0u;
+                bp++;
+                return b;
+            };
+            auto un = [&](int c) -> uint32_t { uint32_t v = 0; for (int i = 0; i < c; i++) v = (v << 1) | u1(); return v; };
+            auto ue = [&]() -> uint32_t {
+                int z = 0; while (u1() == 0 && z < 32 && bp < rbsp.size() * 8) z++;
+                return ((1u << z) - 1u) + (z ? un(z) : 0u);
+            };
+            auto se = [&]() -> int32_t { uint32_t k = ue(); return (k & 1) ? (int32_t) ((k + 1) / 2) : -(int32_t) (k / 2); };
+            uint32_t profile_idc = un(8);
+            un(16);   // constraint flags + reserved + level_idc
+            ue();     // seq_parameter_set_id
+            if (profile_idc == 100 || profile_idc == 110 || profile_idc == 122 || profile_idc == 244 ||
+                profile_idc == 44 || profile_idc == 83 || profile_idc == 86 || profile_idc == 118 ||
+                profile_idc == 128 || profile_idc == 138 || profile_idc == 139 || profile_idc == 134 || profile_idc == 135)
+            {
+                uint32_t chroma = ue();
+                if (chroma == 3) u1();
+                ue(); ue(); u1();
+                if (u1())   // seq_scaling_matrix_present_flag
+                {
+                    int cnt = (chroma != 3) ? 8 : 12;
+                    for (int i = 0; i < cnt; i++)
+                        if (u1())
+                        {
+                            int sz = (i < 6) ? 16 : 64, last = 8, next = 8;
+                            for (int j = 0; j < sz; j++)
+                            { if (next != 0) { int delta = se(); next = (last + delta + 256) % 256; } last = (next == 0) ? last : next; }
+                        }
+                }
+            }
+            ue();                       // log2_max_frame_num_minus4
+            uint32_t poc = ue();
+            if (poc == 0) ue();
+            else if (poc == 1)
+            { u1(); se(); se(); uint32_t num = ue(); for (uint32_t i = 0; i < num; i++) se(); }
+            ue();                        // max_num_ref_frames
+            u1();                        // gaps_in_frame_num_value_allowed_flag
+            uint32_t wmbs  = ue();       // pic_width_in_mbs_minus1
+            uint32_t hmapu = ue();       // pic_height_in_map_units_minus1
+            uint32_t fmo   = u1();       // frame_mbs_only_flag
+            if (!fmo) u1();
+            u1();                        // direct_8x8_inference_flag
+            uint32_t cl = 0, cr = 0, ct = 0, cb = 0;
+            if (u1()) { cl = ue(); cr = ue(); ct = ue(); cb = ue(); }
+            int W = (int) ((wmbs + 1) * 16) - (int) (cl + cr) * 2;
+            int H = (int) ((2 - fmo) * (hmapu + 1) * 16) - (int) (ct + cb) * 2;
+            if (W <= 0 || H <= 0 || W > 8192 || H > 8192) return {1280, 720};
+            return {W, H};
         }
     }
     //
