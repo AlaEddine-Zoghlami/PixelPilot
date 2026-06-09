@@ -125,6 +125,21 @@ class GLFanoutRenderer
         glGenBuffers(1, &vbo_);
         glBindBuffer(GL_ARRAY_BUFFER, vbo_);
         glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
+
+        // OSD overlay program: a plain 2D RGBA texture (the captured OSD layer), alpha-blended
+        // over the video in the DVR/encoder pass when recordOsd is on. Reuses the same quad VBO.
+        static const char* OVS =
+            "attribute vec4 aPos; attribute vec2 aUV; varying vec2 vUV;"
+            "void main(){ vUV=aUV; gl_Position=aPos; }";
+        static const char* OFS =
+            "precision mediump float; varying vec2 vUV; uniform sampler2D uOsd;"
+            "void main(){ gl_FragColor = texture2D(uOsd, vUV); }";
+        osdProg_ = link(OVS, OFS);
+        if (osdProg_) {
+            osdPos_    = glGetAttribLocation(osdProg_, "aPos");
+            osdUV_     = glGetAttribLocation(osdProg_, "aUV");
+            osdTexLoc_ = glGetUniformLocation(osdProg_, "uOsd");
+        }
         return true;
     }
     GLuint link(const char* vs, const char* fs)
@@ -154,8 +169,28 @@ class GLFanoutRenderer
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
         glDisableVertexAttribArray(aPos_);
         glDisableVertexAttribArray(aUV_);
-        // TODO(OSD): if withOsd && osdTex_, draw osdTex_ as a 2nd alpha-blended quad on top.
-        (void) withOsd;
+
+        // OSD layer (DVR pass only, when recordOsd is on): alpha-blend the captured OSD texture
+        // over the video so the recorded .mp4 carries the overlay. The display pass passes
+        // withOsd=false, so the live view stays clean video — one decode, two composites.
+        if (withOsd && osdTex_ != 0 && osdProg_ != 0)
+        {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glUseProgram(osdProg_);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, osdTex_);
+            glUniform1i(osdTexLoc_, 0);
+            glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+            glEnableVertexAttribArray(osdPos_);
+            glVertexAttribPointer(osdPos_, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*) 0);
+            glEnableVertexAttribArray(osdUV_);
+            glVertexAttribPointer(osdUV_, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*) (2 * sizeof(float)));
+            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+            glDisableVertexAttribArray(osdPos_);
+            glDisableVertexAttribArray(osdUV_);
+            glDisable(GL_BLEND);
+        }
     }
 
     ANativeWindow* display_ = nullptr;
@@ -165,8 +200,9 @@ class GLFanoutRenderer
     EGLConfig  cfg_      = nullptr;
     EGLSurface dispSurf_ = EGL_NO_SURFACE;
     EGLSurface encSurf_  = EGL_NO_SURFACE;
-    GLuint     prog_ = 0, oesTex_ = 0, osdTex_ = 0, vbo_ = 0;
+    GLuint     prog_ = 0, osdProg_ = 0, oesTex_ = 0, osdTex_ = 0, vbo_ = 0;
     GLint      aPos_ = -1, aUV_ = -1, uTex_ = -1, uTexOes_ = -1;
+    GLint      osdPos_ = -1, osdUV_ = -1, osdTexLoc_ = -1;
     EGLint     vpW_ = 0, vpH_ = 0;
     std::atomic<bool> ready_{false};
     std::atomic<bool> recordOsd_{false};
