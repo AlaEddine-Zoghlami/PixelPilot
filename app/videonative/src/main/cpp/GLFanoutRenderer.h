@@ -22,6 +22,7 @@
 #include <GLES2/gl2.h>
 #include <GLES2/gl2ext.h>
 #include <atomic>
+#include "GLFanoutEncoder.h"
 
 class GLFanoutRenderer
 {
@@ -66,6 +67,21 @@ class GLFanoutRenderer
     }
 
     void setRecordOsd(bool on) { recordOsd_.store(on); }
+
+    // DVR: create the surface-input encoder, point the fan-out's encoder pass at its input
+    // surface, and route its NALUs to cb (the mp4 writer). The GL pass then composites the
+    // video (+ OSD when recordOsd) into the recording. Call on the GL thread (eglCreateWindowSurface).
+    bool startDvr(int w, int h, int fps, int bitrate, GLFanoutEncoder::OnEncodedNalu cb, bool h265 = false)
+    {
+        if (!encoder_.start(w, h, fps, bitrate, std::move(cb), h265)) return false;
+        setEncoderWindow(encoder_.inputWindow());
+        return true;
+    }
+    void stopDvr()
+    {
+        setEncoderWindow(nullptr);
+        encoder_.stop();
+    }
     // Upload the OSD overlay (RGBA pixels captured from the OSD View) into the 2D texture the
     // DVR pass alpha-blends. Lazy-creates the texture. MUST run on the GL-context thread.
     void updateOsd(const void* rgba, int w, int h)
@@ -221,6 +237,7 @@ class GLFanoutRenderer
     EGLint     vpW_ = 0, vpH_ = 0;
     std::atomic<bool> ready_{false};
     std::atomic<bool> recordOsd_{false};
+    GLFanoutEncoder   encoder_;
 };
 
 #endif  // PIXELPILOT_GLFANOUTRENDERER_H
