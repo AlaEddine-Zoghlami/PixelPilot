@@ -16,10 +16,12 @@ typedef struct _AudioUDPPacket
 {
     _AudioUDPPacket(const uint8_t* _data, size_t _len)
     {
-        memcpy(data, _data, _len);
-        len = _len;
+        // Clamp to the buffer: a larger Opus packet (stereo / higher bitrate) would
+        // otherwise overflow this fixed buffer and abort the process (FORTIFY memcpy).
+        len = _len > sizeof(data) ? sizeof(data) : _len;
+        memcpy(data, _data, len);
     };
-    uint8_t data[250];
+    uint8_t data[1500];  // full UDP payload (was 250 — too small for larger Opus packets)
     size_t  len;
 } AudioUDPPacket;
 
