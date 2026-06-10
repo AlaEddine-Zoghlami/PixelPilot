@@ -136,11 +136,9 @@ public class OSDManager {
     private void applyBoxes() {
         if (listOSDItems == null) return;
         float density = context.getResources().getDisplayMetrics().density;
-        int padH = (int) (6 * density + 0.5f);   // left/right breathing room
-        // Tighter top/bottom: the OSD icons (e.g. the 16x38dp gauge) and TextView font padding
-        // already carry built-in vertical whitespace, so EQUAL padding renders top/bottom-heavy.
-        // A smaller vertical pad makes the visible margin match left/right.
-        int padV = (int) (2 * density + 0.5f);
+        // Small, equal padding all round. The TextView font padding (which made equal padding look
+        // top/bottom-heavy) is stripped in tightenText() below, so equal now renders even.
+        int pad = (int) (3 * density + 0.5f);
         for (OSDElement el : listOSDItems) {
             if (osdBoxes) {
                 // Drop TextView font padding so the box hugs the text symmetrically (esp. video stats).
@@ -149,7 +147,7 @@ public class OSDManager {
                 box.setColor(0x66000000);              // 40% black: readable over bright video, still see-through
                 box.setCornerRadius(4 * density);      // ~4dp rounded corners
                 el.layout.setBackground(box);
-                el.layout.setPadding(padH, padV, padH, padV);
+                el.layout.setPadding(pad, pad, pad, pad);
             } else {
                 tightenText(el.layout, false);
                 el.layout.setBackground(null);
