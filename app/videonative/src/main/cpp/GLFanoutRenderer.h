@@ -89,6 +89,19 @@ class GLFanoutRenderer
         setEncoderWindow(nullptr);
         encoder_.stop();
     }
+    // Secondary RAW stream (Raw+OSD mode): a parallel clean-video encoder, rendered withOsd=false.
+    bool startDvrRaw(int w, int h, int fps, int bitrate, GLFanoutEncoder::OnEncodedNalu cb, bool h265 = false)
+    {
+        if (!encoderRaw_.start(w, h, fps, bitrate, std::move(cb), h265)) return false;
+        if (encSurfRaw_ != EGL_NO_SURFACE) { eglDestroySurface(egl_, encSurfRaw_); encSurfRaw_ = EGL_NO_SURFACE; }
+        if (encoderRaw_.inputWindow()) encSurfRaw_ = eglCreateWindowSurface(egl_, cfg_, encoderRaw_.inputWindow(), nullptr);
+        return encSurfRaw_ != EGL_NO_SURFACE;
+    }
+    void stopDvrRaw()
+    {
+        if (encSurfRaw_ != EGL_NO_SURFACE) { eglDestroySurface(egl_, encSurfRaw_); encSurfRaw_ = EGL_NO_SURFACE; }
+        encoderRaw_.stop();
+    }
     // Upload the OSD overlay (RGBA pixels captured from the OSD View) into the 2D texture the
     // DVR pass alpha-blends. Lazy-creates the texture. MUST run on the GL-context thread.
     void updateOsd(const void* rgba, int w, int h)
@@ -116,23 +129,24 @@ class GLFanoutRenderer
         eglQuerySurface(egl_, dispSurf_, EGL_HEIGHT, &vpH_);
         drawOes(texMatrix, /*withOsd=*/false);
         eglSwapBuffers(egl_, dispSurf_);
-        if (encSurf_ != EGL_NO_SURFACE) {
-            eglMakeCurrent(egl_, encSurf_, encSurf_, ctx_);
-            eglQuerySurface(egl_, encSurf_, EGL_WIDTH, &vpW_);
-            eglQuerySurface(egl_, encSurf_, EGL_HEIGHT, &vpH_);
-            drawOes(texMatrix, /*withOsd=*/recordOsd_.load());
-            // MediaCodec surface-input encoders need a presentation timestamp per frame or they
-            // emit NO output. Stamp from the monotonic clock before the swap.
-            static auto eglPresTime = (EGLBoolean (*)(EGLDisplay, EGLSurface, EGLnsecsANDROID))
-                                      eglGetProcAddress("eglPresentationTimeANDROID");
-            struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
-            if (eglPresTime) eglPresTime(egl_, encSurf_, (EGLnsecsANDROID) ts.tv_sec * 1000000000LL + ts.tv_nsec);
-            EGLBoolean sw = eglSwapBuffers(egl_, encSurf_);
-            static int rc = 0;
-            if (rc < 4) __android_log_print(ANDROID_LOG_DEBUG, "GLFanoutDbg", "renderFrame->enc #%d vp=%dx%d swap=%d pres=%d",
-                                            rc, vpW_, vpH_, (int) sw, (int) (eglPresTime != nullptr));
-            rc++;
-        }
+        encodePass(encSurf_,    recordOsd_.load(), texMatrix);  // primary stream: Raw (clean) OR OSD
+        encodePass(encSurfRaw_, false,             texMatrix);  // secondary stream: Raw+OSD's clean file
+    }
+
+    // One encoder pass: render the frame (+ OSD when withOsd) into a MediaCodec input EGL surface.
+    void encodePass(EGLSurface surf, bool withOsd, const float texMatrix[16])
+    {
+        if (surf == EGL_NO_SURFACE) return;
+        eglMakeCurrent(egl_, surf, surf, ctx_);
+        eglQuerySurface(egl_, surf, EGL_WIDTH, &vpW_);
+        eglQuerySurface(egl_, surf, EGL_HEIGHT, &vpH_);
+        drawOes(texMatrix, withOsd);
+        // Surface-input encoders need a per-frame presentation timestamp or they emit no output.
+        static auto eglPresTime = (EGLBoolean (*)(EGLDisplay, EGLSurface, EGLnsecsANDROID))
+                                  eglGetProcAddress("eglPresentationTimeANDROID");
+        struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+        if (eglPresTime) eglPresTime(egl_, surf, (EGLnsecsANDROID) ts.tv_sec * 1000000000LL + ts.tv_nsec);
+        eglSwapBuffers(egl_, surf);
     }
 
     void release()
@@ -141,6 +155,7 @@ class GLFanoutRenderer
         if (egl_ != EGL_NO_DISPLAY) {
             eglMakeCurrent(egl_, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
             if (encSurf_  != EGL_NO_SURFACE) eglDestroySurface(egl_, encSurf_);
+            if (encSurfRaw_ != EGL_NO_SURFACE) eglDestroySurface(egl_, encSurfRaw_);
             if (dispSurf_ != EGL_NO_SURFACE) eglDestroySurface(egl_, dispSurf_);
             if (ctx_      != EGL_NO_CONTEXT) eglDestroyContext(egl_, ctx_);
             eglTerminate(egl_);
@@ -249,7 +264,8 @@ class GLFanoutRenderer
     EGLContext ctx_      = EGL_NO_CONTEXT;
     EGLConfig  cfg_      = nullptr;
     EGLSurface dispSurf_ = EGL_NO_SURFACE;
-    EGLSurface encSurf_  = EGL_NO_SURFACE;
+    EGLSurface encSurf_    = EGL_NO_SURFACE;
+    EGLSurface encSurfRaw_ = EGL_NO_SURFACE;
     GLuint     prog_ = 0, osdProg_ = 0, oesTex_ = 0, osdTex_ = 0, vbo_ = 0;
     GLint      aPos_ = -1, aUV_ = -1, uTex_ = -1, uTexOes_ = -1;
     GLint      osdPos_ = -1, osdUV_ = -1, osdTexLoc_ = -1;
@@ -257,6 +273,7 @@ class GLFanoutRenderer
     std::atomic<bool> ready_{false};
     std::atomic<bool> recordOsd_{false};
     GLFanoutEncoder   encoder_;
+    GLFanoutEncoder   encoderRaw_;
 };
 
 #endif  // PIXELPILOT_GLFANOUTRENDERER_H

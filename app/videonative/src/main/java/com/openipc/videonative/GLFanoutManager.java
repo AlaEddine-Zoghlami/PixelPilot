@@ -108,6 +108,15 @@ public class GLFanoutManager implements SurfaceTexture.OnFrameAvailableListener 
         });
     }
 
+    /** Secondary clean (raw) DVR stream, parallel to startDvr's OSD stream — for Raw+OSD mode. */
+    public void startDvrRaw(final int fd, final int w, final int h, final int fps, final int bitrate, final boolean fmp4) {
+        if (glHandler == null) return;
+        glHandler.post(() -> { if (nativeHandle != 0) nativeStartDvrRaw(nativeHandle, fd, w, h, fps, bitrate, fmp4); });
+    }
+    public void stopDvrRaw() {
+        if (glHandler != null) glHandler.post(() -> { if (nativeHandle != 0) nativeStopDvrRaw(nativeHandle); });
+    }
+
     @Override
     public void onFrameAvailable(SurfaceTexture st) {   // runs on the GL thread (glHandler)
         if (nativeHandle == 0) return;
@@ -141,4 +150,6 @@ public class GLFanoutManager implements SurfaceTexture.OnFrameAvailableListener 
     private native void nativeRelease(long handle);
     private native void nativeStartDvr(long handle, int fd, int w, int h, int fps, int bitrate, boolean fmp4, boolean h265);
     private native void nativeStopDvr(long handle);
+    private native void nativeStartDvrRaw(long handle, int fd, int w, int h, int fps, int bitrate, boolean fmp4);
+    private native void nativeStopDvrRaw(long handle);
 }

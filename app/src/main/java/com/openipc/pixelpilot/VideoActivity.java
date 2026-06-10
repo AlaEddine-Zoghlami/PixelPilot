@@ -1709,7 +1709,9 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
 
     }
 
-    private Uri openDvrFile() {
+    private Uri openDvrFile() { return openDvrFile(""); }
+
+    private Uri openDvrFile(String suffix) {
         String dvrFolder = getSharedPreferences("general",
                 Context.MODE_PRIVATE).getString("dvr_folder_", "");
         if (dvrFolder.isEmpty()) {
@@ -1720,10 +1722,10 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         DocumentFile pickedDir = DocumentFile.fromTreeUri(this, uri);
         if (pickedDir != null && pickedDir.canWrite()) {
             LocalDateTime now = LocalDateTime.now();
-            DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyyMMdd-HHmm");
+            DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss");
             // Format the current date and time
             String formattedNow = now.format(formatter);
-            String filename = "pixelpilot_" + formattedNow + ".mp4";
+            String filename = "pixelpilot_" + formattedNow + suffix + ".mp4";
             DocumentFile newFile = pickedDir.createFile("video/mp4", filename);
             Toast.makeText(this, "Recording to " + filename, Toast.LENGTH_SHORT).show();
             if (newFile == null)
@@ -1774,6 +1776,15 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
                 android.graphics.Bitmap osd = recordOsd ? captureOsdBitmap() : null;
                 fo.startDvr(dvrFd.getFd(), vw, vh, fps, 8000000, getDvrMP4(), false, recordOsd, osd);  // DVR re-encodes to H.264
                 if (recordOsd) startOsdUpdateTimer();  // keep the recorded OSD live (telemetry/GPS change)
+                if (getDvrRecordMode() == 2) {  // Raw+OSD: also record a parallel CLEAN file (_raw)
+                    try {
+                        Uri rawUri = openDvrFile("_raw");
+                        if (rawUri != null) {
+                            rawDvrFd = getContentResolver().openFileDescriptor(rawUri, "rw");
+                            fo.startDvrRaw(rawDvrFd.getFd(), vw, vh, fps, 8000000, getDvrMP4());
+                        }
+                    } catch (IOException re) { Log.e(TAG, "raw dvr open failed", re); rawDvrFd = null; }
+                }
             } else {
                 videoPlayer.startDvr(dvrFd.getFd(), getDvrMP4());
             }
@@ -1816,11 +1827,12 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         if (osdUpdateTimer != null) { osdUpdateTimer.cancel(); osdUpdateTimer = null; }
         if (dvrViaFanout) {
             com.openipc.videonative.GLFanoutManager fo = videoPlayer.getGlFanout();
-            if (fo != null) fo.stopDvr();
+            if (fo != null) { fo.stopDvr(); fo.stopDvrRaw(); }
             dvrViaFanout = false;
         } else {
             videoPlayer.stopDvr();
         }
+        if (rawDvrFd != null) { try { rawDvrFd.close(); } catch (IOException e) { } rawDvrFd = null; }
         if (recordTimer != null) {
             recordTimer.cancel();
             recordTimer.purge();
@@ -1932,6 +1944,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
 
     // GL fan-out DVR: tracks whether the active recording is routed through the fan-out (vs legacy).
     private boolean dvrViaFanout = false;
+    private ParcelFileDescriptor rawDvrFd;  // Raw+OSD: the parallel clean (_raw) file's fd
     // Last-valid video params for the DVR — mDecodingInfo/lastVideoW reset (null/0) when the menu
     // opens or the stream gaps, so cache the good values to choose + configure the fan-out DVR.
     private int dvrCapW, dvrCapH, dvrCapFps;

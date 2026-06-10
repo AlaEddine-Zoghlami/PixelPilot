@@ -16,7 +16,8 @@
 extern "C" void* glfanout_dvr_start(int fd, int w, int h, int fps, int fmp4, int h265);
 extern "C" void  glfanout_dvr_write(void* dvr, const uint8_t* data, size_t size);
 extern "C" void  glfanout_dvr_stop(void* dvr);
-static void* g_glDvr = nullptr;
+static void* g_glDvr    = nullptr;   // primary stream writer (Raw OR OSD)
+static void* g_glDvrRaw = nullptr;   // secondary clean writer (Raw+OSD mode)
 
 extern "C" {
 
@@ -92,6 +93,25 @@ JNIEXPORT void JNICALL
 Java_com_openipc_videonative_GLFanoutManager_nativeStopDvr(JNIEnv*, jobject, jlong h) {
     if (h) R(h)->stopDvr();   // flush EOS + join drain -> all NALUs written -> safe to free
     if (g_glDvr) { glfanout_dvr_stop(g_glDvr); g_glDvr = nullptr; }
+}
+
+// Secondary RAW stream (Raw+OSD): a parallel clean-video encoder/writer alongside the OSD one.
+JNIEXPORT void JNICALL
+Java_com_openipc_videonative_GLFanoutManager_nativeStartDvrRaw(
+    JNIEnv*, jobject, jlong h, jint fd, jint w, jint hh, jint fps, jint bitrate, jboolean fmp4) {
+    if (!h || g_glDvrRaw) return;
+    g_glDvrRaw = glfanout_dvr_start((int) fd, (int) w, (int) hh, (int) fps, fmp4 == JNI_TRUE ? 1 : 0, 0);
+    if (!g_glDvrRaw) return;
+    if (!R(h)->startDvrRaw((int) w, (int) hh, (int) fps, (int) bitrate,
+                           [](const uint8_t* d, size_t s, bool) { glfanout_dvr_write(g_glDvrRaw, d, s); }, false)) {
+        glfanout_dvr_stop(g_glDvrRaw); g_glDvrRaw = nullptr;
+    }
+}
+
+JNIEXPORT void JNICALL
+Java_com_openipc_videonative_GLFanoutManager_nativeStopDvrRaw(JNIEnv*, jobject, jlong h) {
+    if (h) R(h)->stopDvrRaw();
+    if (g_glDvrRaw) { glfanout_dvr_stop(g_glDvrRaw); g_glDvrRaw = nullptr; }
 }
 
 }  // extern "C"
