@@ -55,8 +55,12 @@ extern "C" void* glfanout_dvr_start(int fd, int w, int h, int fps, int fmp4, int
 {
     auto* d = new GlDvrW();
     d->fps  = fps > 0 ? fps : 30;
-    d->fout = fdopen(fd, "wb");
-    if (!d->fout) { delete d; return nullptr; }
+    // dup the fd: the caller's fd is owned by the Java ParcelFileDescriptor (fdsan), so fdopen
+    // taking ownership SIGABRTs. Same as the legacy DVR (dvr_fd = dup(fd)). fclose closes our dup.
+    int dupfd = dup(fd);
+    if (dupfd < 0) { delete d; return nullptr; }
+    d->fout = fdopen(dupfd, "wb");
+    if (!d->fout) { close(dupfd); delete d; return nullptr; }
     d->mux = MP4E_open(0 /*sequential*/, fmp4 ? 1 : 0, d->fout, write_callback);
     if (!d->mux) { fclose(d->fout); delete d; return nullptr; }
     if (mp4_h26x_write_init(&d->wr, d->mux, w, h, h265 != 0) != MP4E_STATUS_OK)
