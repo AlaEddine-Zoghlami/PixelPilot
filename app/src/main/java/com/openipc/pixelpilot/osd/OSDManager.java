@@ -118,8 +118,29 @@ public class OSDManager {
             element.layout.restorePosition(element.prefName());
             element.layout.setMovable(!isOSDLocked());
         }
+        for (OSDElement element : listOSDItems) tightenIcons(element.layout);
         osdBoxes = isBoxesEnabled();
         applyBoxes();
+    }
+
+    // Make icon ImageViews hug their drawable (adjustViewBounds + wrap height) instead of sitting in
+    // a fixed-tall view with built-in whitespace — so element height = the visible glyph, and the
+    // box wraps it tightly with even margins. Covers every element incl. the video-stats monitor icon.
+    private void tightenIcons(android.view.View v) {
+        if (v instanceof android.widget.ImageView) {
+            android.widget.ImageView iv = (android.widget.ImageView) v;
+            if (iv.getDrawable() != null) {
+                iv.setAdjustViewBounds(true);
+                android.view.ViewGroup.LayoutParams lp = iv.getLayoutParams();
+                if (lp != null && lp.height != android.view.ViewGroup.LayoutParams.WRAP_CONTENT) {
+                    lp.height = android.view.ViewGroup.LayoutParams.WRAP_CONTENT;
+                    iv.setLayoutParams(lp);
+                }
+            }
+        } else if (v instanceof android.view.ViewGroup) {
+            android.view.ViewGroup g = (android.view.ViewGroup) v;
+            for (int i = 0; i < g.getChildCount(); i++) tightenIcons(g.getChildAt(i));
+        }
     }
 
     /** Whether OSD elements get a semi-transparent box behind them for readability over the video. */
