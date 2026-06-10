@@ -184,14 +184,40 @@ void VideoDecoder::configureStartDecoder(int idx)
     AMediaFormat* format = AMediaFormat_new();
     AMediaFormat_setString(format, AMEDIAFORMAT_KEY_MIME, MIME.c_str());
 
-    // AMediaFormat_setInt32(format, "low-latency", 1);
-    // AMediaFormat_setInt32(format, "vendor.low-latency.enable", 1);
-    // AMediaFormat_setInt32(format, "vendor.qti-ext-dec-low-latency.enable", 1);
-    // AMediaFormat_setInt32(format, "vendor.hisi-ext-low-latency-video-dec.video-scene-for-low-latency-req", 1);
-    // AMediaFormat_setInt32(format, "vendor.rtc-ext-dec-low-latency.enable", 1);
-
-    // MediaCodec supports two priorities: 0 - realtime, 1 - best effort
-    // AMediaFormat_setInt32(format, "priority", 0);
+    // ---- FPV latency-priority decode config (APFPV) -----------------------------------------
+    // Adapted from the PixelPilot-MTK-Optimized fork (thamtrung151). For FPV we prioritise glass-
+    // to-glass latency over smoothness: real-time priority, low-latency decode, small buffer queues
+    // (less queuing delay), and — on MediaTek — the vendor low-latency key + a high operating-rate.
+    // Gated so it can be A/B'd at runtime WITHOUT a rebuild: `setprop persist.pixelpilot.mtkopt 0`
+    // restores the legacy behaviour (no keys set). Default ON. Generic keys (low-latency/priority)
+    // are documented as harmless on devices that ignore them; the vendor.mtk key is SoC-gated.
+    {
+        char gate[PROP_VALUE_MAX] = {0};
+        char plat[PROP_VALUE_MAX] = {0};
+        __system_property_get("persist.pixelpilot.mtkopt", gate);
+        __system_property_get("ro.board.platform", plat);
+        mLowLatencyOpt   = (gate[0] != '0');                       // default ON unless explicitly "0"
+        mIsMtk           = std::string(plat).rfind("mt", 0) == 0;
+        const bool isMtk = mIsMtk;
+        if (mLowLatencyOpt)
+        {
+            AMediaFormat_setInt32(format, "low-latency", 1);       // PARAMETER_KEY_LOW_LATENCY
+            AMediaFormat_setInt32(format, "priority", 0);          // 0 = realtime
+            AMediaFormat_setInt32(format, "operating-rate", 240);  // run the HW decoder flat-out
+            // Small queues = less buffered latency. 4 (vs the fork's 3) keeps a touch of headroom
+            // for the lossy RF link without letting a deep backlog accumulate.
+            AMediaFormat_setInt32(format, "android._num-input-buffers", 4);
+            AMediaFormat_setInt32(format, "android._num-output-buffers", 4);
+            if (isMtk)
+            {
+                AMediaFormat_setInt32(format, "vendor.mtk-videodec-low-latency", 1);
+            }
+            __android_log_print(ANDROID_LOG_INFO, "VideoDecoder",
+                "FPV latency-priority decode ON (mtk=%d, flush=%dms; 0=off)", (int) isMtk,
+                mFlushThresholdMs);
+        }
+    }
+    // -----------------------------------------------------------------------------------------
 
     if (IS_H265)
     {
@@ -326,7 +352,8 @@ void VideoDecoder::feedDecoder(const NALU& nalu, int idx)
 
 void VideoDecoder::checkOutputLoop(int idx)
 {
-    NDKThreadHelper::setProcessThreadPriorityAttachDetach(javaVm, -16, "DecoderCheckOutput");
+    // FPV latency priority gets a higher (more negative) real-time-ish niceness for the drain thread.
+    NDKThreadHelper::setProcessThreadPriorityAttachDetach(javaVm, mLowLatencyOpt ? -20 : -16, "DecoderCheckOutput");
     AMediaCodecBufferInfo info;
     bool                  decoderSawEOS          = false;
     bool                  decoderProducedUnknown = false;
@@ -345,6 +372,16 @@ void VideoDecoder::checkOutputLoop(int idx)
             //-> Message kWhatReleaseOutputBuffer -> onReleaseOutputBuffer
             //  also https://android.googlesource.com/platform/frameworks/native/+/5c1139f/libs/gui/SurfaceTexture.cpp
             if (!decoder.codec[idx]) break;
+            // FPV latency priority (MediaTek only): if this frame is already stale (a backlog built
+            // up on the lossy RF link), flush to the next keyframe instead of rendering late frames
+            // and letting latency grow unbounded. Threshold is the menu-configurable mFlushThresholdMs
+            // (0 = off). The buffer index is invalidated by flush, so skip render+stats.
+            if (mLowLatencyOpt && mIsMtk && mFlushThresholdMs > 0 && idx == 0 &&
+                (nowUS - info.presentationTimeUs) > (int64_t) mFlushThresholdMs * 1000)
+            {
+                AMediaCodec_flush(decoder.codec[idx]);
+                continue;
+            }
             AMediaCodec_releaseOutputBuffer(decoder.codec[idx], (size_t) index, true);
             // but the presentationTime is in US
             if (idx == 0)

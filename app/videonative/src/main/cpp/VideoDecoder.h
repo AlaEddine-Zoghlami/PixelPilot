@@ -91,6 +91,9 @@ class VideoDecoder
     //  If the input pipe was closed (surface has been removed or is not set yet), only buffer key frames
     void interpretNALU(const NALU& nalu);
 
+    // Set the MTK stale-frame flush threshold in ms (0 = off). Called from JNI when the menu changes.
+    void setFlushThresholdMs(int ms) { mFlushThresholdMs = ms < 0 ? 0 : ms; }
+
   private:
     // Initialize decoder with SPS / PPS data from KeyFrameFinder
     // Set Decoder.configured to true on success
@@ -109,6 +112,18 @@ class VideoDecoder
 
     std::unique_ptr<std::thread> mCheckOutputThread[2]  = {nullptr, nullptr};
     bool                         USE_SW_DECODER_INSTEAD = false;
+    // FPV latency-priority decode (APFPV). Set in configureStartDecoder from the SoC + the runtime
+    // gate `persist.pixelpilot.mtkopt` (default ON; `setprop ... 0` reverts to legacy for A/B).
+    // When on, checkOutputLoop drops a stale backlog instead of rendering late frames.
+    bool                         mLowLatencyOpt = false;
+    // MediaTek SoC? The stale-frame flush is MTK-only (the MTK HW decoder is the one that backs up
+    // on a lossy link). Set from ro.board.platform in configureStartDecoder.
+    bool                         mIsMtk = false;
+    // Stale-frame flush threshold (ms). 0 = off. MTK-only; configurable from the settings menu
+    // (the item is shown only on MTK). Default 60 ms (matches the MTK-Optimized fork). When a
+    // decoded frame is later than this we drop-to-keyframe instead of rendering late + growing
+    // latency. Set from JNI via setFlushThresholdMs(); plain int (benign 1-frame race on retune).
+    int                          mFlushThresholdMs = 60;
     // Holds the AMediaCodec instance, as well as the state (configured or not configured)
     Decoder      decoder{};
     DecodingInfo decodingInfo;

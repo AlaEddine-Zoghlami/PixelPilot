@@ -107,6 +107,10 @@ class VideoPlayer
     {
         {
             std::lock_guard<std::mutex> lock(mtx);
+            // Cap the DVR recording queue: a slow disk must not grow it unbounded (OOM). When full,
+            // drop the new NALU — the recording loses frames rather than the app crashing; the live
+            // decode path is unaffected (this queue only feeds the MP4 writer).
+            if (naluQueue.size() >= 500) return;
             naluQueue.push(nalu);
         }
         cv.notify_one();

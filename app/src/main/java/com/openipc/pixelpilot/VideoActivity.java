@@ -625,6 +625,11 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         // OSD submenu
         setupOSDSubMenu(popup);
 
+        // Video flush (ms) — MediaTek only (the stale-frame flush is on the MTK decode path).
+        if (isMtkDevice()) {
+            setupVideoFlushSubMenu(popup);
+        }
+
         // WFB-NG gs.key — only meaningful in WFB mode; APFPV uses WPA2 creds.
         if (!apfpvMode) {
             setupWFBSubMenu(popup);
@@ -701,6 +706,41 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         for (String bwStr : bws) {
             bwMenu.add(bwStr).setOnMenuItemClickListener(item -> {
                 onBandwidthSettingChanged(Integer.parseInt(bwStr));
+                return true;
+            });
+        }
+    }
+
+    /** True on MediaTek SoCs — the stale-frame flush (and its menu item) is MTK-only. */
+    static boolean isMtkDevice() {
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= 31
+                && "mediatek".equalsIgnoreCase(android.os.Build.SOC_MANUFACTURER)) return true;
+        } catch (Throwable ignored) {}
+        String hw = android.os.Build.HARDWARE == null ? "" : android.os.Build.HARDWARE.toLowerCase(Locale.US);
+        String bd = android.os.Build.BOARD == null ? "" : android.os.Build.BOARD.toLowerCase(Locale.US);
+        return hw.startsWith("mt") || bd.startsWith("mt");
+    }
+
+    /** Menu-configured MTK stale-frame flush threshold in ms (0 = off). Default 60. */
+    static int getVideoFlushMs(Context ctx) {
+        return ctx.getSharedPreferences("general", Context.MODE_PRIVATE).getInt("video_flush_ms", 60);
+    }
+
+    /**
+     * Submenu to set the MTK stale-frame flush threshold (ms). 0 disables. Shown on MTK only.
+     * Drops a stale decoded-frame backlog to the next keyframe instead of rendering late (FPV latency).
+     */
+    private void setupVideoFlushSubMenu(PopupMenu popup) {
+        SubMenu s = popup.getMenu().addSubMenu("Video flush (ms)");
+        int cur = getVideoFlushMs(this);
+        s.add("Current: " + (cur == 0 ? "off" : cur + " ms")).setEnabled(false);
+        for (int v = 0; v <= 200; v += 20) {
+            final int val = v;
+            s.add(v == 0 ? "off" : String.valueOf(v)).setOnMenuItemClickListener(i -> {
+                getSharedPreferences("general", MODE_PRIVATE).edit().putInt("video_flush_ms", val).apply();
+                if (videoPlayer != null) videoPlayer.setVideoFlushMs(val);
+                Toast.makeText(this, "Video flush -> " + (val == 0 ? "off" : val + " ms"), Toast.LENGTH_SHORT).show();
                 return true;
             });
         }
@@ -2165,6 +2205,8 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         }
         videoPlayer.start();
         videoPlayer.startAudio();
+        // Apply the MTK stale-frame flush threshold from the menu pref (no-op on non-MTK natively).
+        if (isMtkDevice()) videoPlayer.setVideoFlushMs(getVideoFlushMs(this));
         if (getDvrAuto()) startAutoDvrWatcher();
 
         osdManager.restoreOSDConfig();
@@ -2261,12 +2303,23 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
             }
             float dropPct = decodingInfo.nNALU > 0
                     ? 100f * (decodingInfo.nNALU - decodingInfo.nNALUSFeeded) / decodingInfo.nNALU : 0f;
+            // Resolution: lastVideoW/H are fed by onVideoRatioChanged, which never fires on the
+            // GL-fan-out / APFPV decode path (see VideoPlayer.cpp:517) — so they stay 0 and the OSD
+            // showed "0x0". Read the reliable native getter (latestVideoRatio) that the DVR already
+            // uses; fall back to lastVideoW only if the player is gone.
+            int statW = (videoPlayer != null && videoPlayer.getVideoWidth()  > 0) ? videoPlayer.getVideoWidth()  : lastVideoW;
+            int statH = (videoPlayer != null && videoPlayer.getVideoHeight() > 0) ? videoPlayer.getVideoHeight() : lastVideoH;
+            // Bitrate: currentKiloBitsPerSecond is already kbps. The old code divided by 1000 in BOTH
+            // branches, so e.g. 600 kbps printed as "0.6Kpbs" (and "Kpbs" was a typo). Only the Mbps
+            // branch should divide.
+            boolean mbps = decodingInfo.currentKiloBitsPerSecond > 1000;
+            float rate = mbps ? decodingInfo.currentKiloBitsPerSecond / 1000f : decodingInfo.currentKiloBitsPerSecond;
             String info = "%dx%d@%.0f " + (decodingInfo.nCodec == 1 ? " H265 " : " H264 ")
-                    + (decodingInfo.currentKiloBitsPerSecond > 1000 ? " %.1fMbps " : " %.1fKpbs ")
+                    + (mbps ? " %.1fMbps " : " %.0fKbps ")
                     + " %.1fms  drop %.1f%%";
             binding.tvVideoStats.setText(String.format(Locale.US, info,
-                    lastVideoW, lastVideoH, decodingInfo.currentFPS,
-                    decodingInfo.currentKiloBitsPerSecond / 1000,
+                    statW, statH, decodingInfo.currentFPS,
+                    rate,
                     decodingInfo.avgTotalDecodingTime_ms, dropPct));
         });
     }

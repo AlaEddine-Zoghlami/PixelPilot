@@ -528,6 +528,10 @@ Java_com_openipc_videonative_VideoPlayer_nativeGetVideoFps(JNIEnv*, jclass, jlon
 extern "C" JNIEXPORT jint JNICALL
 Java_com_openipc_videonative_VideoPlayer_nativeGetVideoCodec(JNIEnv*, jclass, jlong ni)
 { return (jint) native(ni)->latestDecodingInfo.nCodec; }
+// MTK stale-frame flush threshold (ms, 0=off) — set from the settings menu (MTK devices only).
+extern "C" JNIEXPORT void JNICALL
+Java_com_openipc_videonative_VideoPlayer_nativeSetVideoFlushMs(JNIEnv*, jclass, jlong ni, jint ms)
+{ native(ni)->videoDecoder.setFlushThresholdMs((int) ms); }
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_openipc_videonative_VideoPlayer_nativeIsRecording(JNIEnv* env, jclass clazz, jlong native_instance)
