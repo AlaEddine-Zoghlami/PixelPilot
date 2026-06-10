@@ -22,6 +22,7 @@
 #include <GLES2/gl2.h>
 #include <GLES2/gl2ext.h>
 #include <atomic>
+#include <time.h>
 #include "GLFanoutEncoder.h"
 
 class GLFanoutRenderer
@@ -35,9 +36,13 @@ class GLFanoutRenderer
         display_ = displayWindow;
         egl_ = eglGetDisplay(EGL_DEFAULT_DISPLAY);
         if (egl_ == EGL_NO_DISPLAY || !eglInitialize(egl_, nullptr, nullptr)) return fail("eglInitialize");
+        // EGL_RECORDABLE_ANDROID is REQUIRED so the same config can drive a MediaCodec input
+        // surface (the DVR encoder) — without it the encoder errors and emits no output. Also
+        // valid for the display window surface, so one config serves both.
         const EGLint cfgAttr[] = {EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
                                   EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
-                                  EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_NONE};
+                                  EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8,
+                                  EGL_RECORDABLE_ANDROID, 1, EGL_NONE};
         EGLint n = 0;
         if (!eglChooseConfig(egl_, cfgAttr, &cfg_, 1, &n) || n < 1) return fail("eglChooseConfig");
         const EGLint ctxAttr[] = {EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE};
@@ -64,6 +69,8 @@ class GLFanoutRenderer
         if (encSurf_ != EGL_NO_SURFACE) { eglDestroySurface(egl_, encSurf_); encSurf_ = EGL_NO_SURFACE; }
         enc_ = encWindow;
         if (enc_) encSurf_ = eglCreateWindowSurface(egl_, cfg_, enc_, nullptr);
+        __android_log_print(ANDROID_LOG_DEBUG, "GLFanoutDbg", "setEncoderWindow win=%p encSurf=%p err=0x%x",
+                            (void*) enc_, (void*) encSurf_, enc_ ? eglGetError() : 0);
     }
 
     void setRecordOsd(bool on) { recordOsd_.store(on); }
@@ -114,7 +121,17 @@ class GLFanoutRenderer
             eglQuerySurface(egl_, encSurf_, EGL_WIDTH, &vpW_);
             eglQuerySurface(egl_, encSurf_, EGL_HEIGHT, &vpH_);
             drawOes(texMatrix, /*withOsd=*/recordOsd_.load());
-            eglSwapBuffers(egl_, encSurf_);
+            // MediaCodec surface-input encoders need a presentation timestamp per frame or they
+            // emit NO output. Stamp from the monotonic clock before the swap.
+            static auto eglPresTime = (EGLBoolean (*)(EGLDisplay, EGLSurface, EGLnsecsANDROID))
+                                      eglGetProcAddress("eglPresentationTimeANDROID");
+            struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+            if (eglPresTime) eglPresTime(egl_, encSurf_, (EGLnsecsANDROID) ts.tv_sec * 1000000000LL + ts.tv_nsec);
+            EGLBoolean sw = eglSwapBuffers(egl_, encSurf_);
+            static int rc = 0;
+            if (rc < 4) __android_log_print(ANDROID_LOG_DEBUG, "GLFanoutDbg", "renderFrame->enc #%d vp=%dx%d swap=%d pres=%d",
+                                            rc, vpW_, vpH_, (int) sw, (int) (eglPresTime != nullptr));
+            rc++;
         }
     }
 

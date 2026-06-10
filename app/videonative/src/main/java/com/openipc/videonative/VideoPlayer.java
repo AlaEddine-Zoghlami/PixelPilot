@@ -54,6 +54,18 @@ public class VideoPlayer implements IVideoParamsChanged {
 
     public static native void nativeStopDvr(long nativeInstance);
 
+    public static native int nativeGetVideoWidth(long nativeInstance);
+    public static native int nativeGetVideoHeight(long nativeInstance);
+    public static native int nativeGetVideoFps(long nativeInstance);
+    public static native int nativeGetVideoCodec(long nativeInstance);
+
+    /** Reliable current video params straight from the decoder (the IVideoParamsChanged Java
+     *  callbacks don't reach VideoActivity, so the DVR sources W/H/fps/codec from here). */
+    public int     getVideoWidth()  { return nativeGetVideoWidth(nativeVideoPlayer); }
+    public int     getVideoHeight() { return nativeGetVideoHeight(nativeVideoPlayer); }
+    public int     getVideoFps()    { return nativeGetVideoFps(nativeVideoPlayer); }
+    public boolean getVideoIsH265() { return nativeGetVideoCodec(nativeVideoPlayer) == 1; }
+
     public static native boolean nativeIsRecording(long nativeInstance);
     public static native void nativeStartAudio(long nativeInstance);
     public static native void nativeStopAudio(long nativeInstance);

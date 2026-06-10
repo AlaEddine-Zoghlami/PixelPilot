@@ -74,9 +74,11 @@ class GLFanoutEncoder
     void drainLoop()
     {
         AMediaCodecBufferInfo info;
+        int dbg = 0;
         while (running_.load())
         {
             ssize_t eo = AMediaCodec_dequeueOutputBuffer(enc_, &info, 5000);
+            if (dbg < 8) { __android_log_print(ANDROID_LOG_DEBUG, "GLFanoutDbg", "drain eo=%zd size=%d", eo, (int) (eo >= 0 ? info.size : -1)); dbg++; }
             if (eo < 0) continue;
             size_t   sz  = 0;
             uint8_t* out = AMediaCodec_getOutputBuffer(enc_, eo, &sz);

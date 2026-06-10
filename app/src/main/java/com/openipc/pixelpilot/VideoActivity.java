@@ -1751,14 +1751,15 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         try {
             dvrFd = getContentResolver().openFileDescriptor(dvrUri, "rw");
             com.openipc.videonative.GLFanoutManager fo = videoPlayer.getGlFanout();
-            dvrViaFanout = (fo != null && mDecodingInfo != null && lastVideoW > 0 && lastVideoH > 0);
+            int vw = videoPlayer.getVideoWidth(), vh = videoPlayer.getVideoHeight();
+            dvrViaFanout = (fo != null && vw > 0 && vh > 0);
+            android.util.Log.d("GLFanoutDbg", "DVRpath fanout=" + dvrViaFanout + " w=" + vw + " h=" + vh + " fps=" + videoPlayer.getVideoFps() + " h265=" + videoPlayer.getVideoIsH265());
             if (dvrViaFanout) {
                 // GL fan-out DVR: shares the live decode; composites the OSD overlay when enabled.
-                int fps = (int) (mDecodingInfo.currentFPS > 0 ? mDecodingInfo.currentFPS : 30);
-                boolean h265 = mDecodingInfo.nCodec == 1;
+                int fps = videoPlayer.getVideoFps() > 0 ? videoPlayer.getVideoFps() : 30;
                 boolean recordOsd = getDvrRecordOsd();
                 android.graphics.Bitmap osd = recordOsd ? captureOsdBitmap() : null;
-                fo.startDvr(dvrFd.getFd(), lastVideoW, lastVideoH, fps, 8000000, getDvrMP4(), h265, recordOsd, osd);
+                fo.startDvr(dvrFd.getFd(), vw, vh, fps, 8000000, getDvrMP4(), false, recordOsd, osd);  // DVR re-encodes to H.264
             } else {
                 videoPlayer.startDvr(dvrFd.getFd(), getDvrMP4());
             }
@@ -1916,6 +1917,10 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
 
     // GL fan-out DVR: tracks whether the active recording is routed through the fan-out (vs legacy).
     private boolean dvrViaFanout = false;
+    // Last-valid video params for the DVR — mDecodingInfo/lastVideoW reset (null/0) when the menu
+    // opens or the stream gaps, so cache the good values to choose + configure the fan-out DVR.
+    private int dvrCapW, dvrCapH, dvrCapFps;
+    private boolean dvrCapH265;
 
     public boolean getDvrRecordOsd() {
         return getSharedPreferences("general", Context.MODE_PRIVATE).getBoolean("dvr_record_osd", false);
@@ -2087,6 +2092,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
     public void onVideoRatioChanged(final int videoW, final int videoH) {
         lastVideoW = videoW;
         lastVideoH = videoH;
+        if (videoW > 0 && videoH > 0) { dvrCapW = videoW; dvrCapH = videoH; }  // last-valid for DVR
 
         Log.d(TAG, "Set resolution: " + videoW + "x" + videoH);
 
@@ -2114,6 +2120,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
     @Override
     public void onDecodingInfoChanged(final DecodingInfo decodingInfo) {
         mDecodingInfo = decodingInfo;
+        if (decodingInfo != null && decodingInfo.currentFPS > 0) { dvrCapFps = (int) decodingInfo.currentFPS; dvrCapH265 = decodingInfo.nCodec == 1; }
         runOnUiThread(() -> {
             if (lastCodec != decodingInfo.nCodec) {
                 lastCodec = decodingInfo.nCodec;

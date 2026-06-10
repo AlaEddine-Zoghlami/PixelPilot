@@ -73,7 +73,14 @@ extern "C" void* glfanout_dvr_start(int fd, int w, int h, int fps, int fmp4, int
 extern "C" void glfanout_dvr_write(void* dvr, const uint8_t* data, size_t size)
 {
     auto* d = reinterpret_cast<GlDvrW*>(dvr);
-    if (d && d->wrInited) mp4_h26x_write_nal(&d->wr, data, size, 90000 / (d->fps > 0 ? d->fps : 30));
+    static int cnt = 0;
+    if (cnt < 6) __android_log_print(ANDROID_LOG_DEBUG, "GLFanoutDbg", "dvr_write #%d sz=%zu d=%p", cnt, size, (void*) d);
+    cnt++;
+    if (d && d->wrInited)
+    {
+        int r = mp4_h26x_write_nal(&d->wr, data, size, 90000 / (d->fps > 0 ? d->fps : 30));
+        if (cnt < 6) __android_log_print(ANDROID_LOG_DEBUG, "GLFanoutDbg", "  write_nal r=%d", r);
+    }
 }
 extern "C" void glfanout_dvr_stop(void* dvr)
 {
@@ -506,6 +513,21 @@ Java_com_openipc_videonative_VideoPlayer_nativeStopDvr(JNIEnv* env, jclass clazz
 {
     native(native_instance)->stopDvr();
 }
+
+// Reliable video params straight from the decoder. The IVideoParamsChanged Java callbacks don't
+// reach VideoActivity (its onVideoRatioChanged never fires), so the GL fan-out DVR reads here.
+extern "C" JNIEXPORT jint JNICALL
+Java_com_openipc_videonative_VideoPlayer_nativeGetVideoWidth(JNIEnv*, jclass, jlong ni)
+{ return (jint) native(ni)->latestVideoRatio.width; }
+extern "C" JNIEXPORT jint JNICALL
+Java_com_openipc_videonative_VideoPlayer_nativeGetVideoHeight(JNIEnv*, jclass, jlong ni)
+{ return (jint) native(ni)->latestVideoRatio.height; }
+extern "C" JNIEXPORT jint JNICALL
+Java_com_openipc_videonative_VideoPlayer_nativeGetVideoFps(JNIEnv*, jclass, jlong ni)
+{ return (jint) native(ni)->latestDecodingInfo.currentFPS; }
+extern "C" JNIEXPORT jint JNICALL
+Java_com_openipc_videonative_VideoPlayer_nativeGetVideoCodec(JNIEnv*, jclass, jlong ni)
+{ return (jint) native(ni)->latestDecodingInfo.nCodec; }
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_openipc_videonative_VideoPlayer_nativeIsRecording(JNIEnv* env, jclass clazz, jlong native_instance)

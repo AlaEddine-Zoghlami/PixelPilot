@@ -202,6 +202,18 @@ void VideoDecoder::configureStartDecoder(int idx)
         h264_configureAMediaFormat(mKeyFrameFinder, format);
     }
 
+    // The OUTPUT_FORMAT_CHANGED event carries no W/H for a Surface-output decoder (the GL fan-out),
+    // so the ratio callback never fires there and latestVideoRatio stays 0. Fire it here from the
+    // SPS-derived format so the DVR (and anything else) gets the real resolution.
+    {
+        int32_t fw = 0, fh = 0;
+        AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_WIDTH, &fw);
+        AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_HEIGHT, &fh);
+        __android_log_print(ANDROID_LOG_DEBUG, "GLFanoutDbg", "configure idx=%d fw=%d fh=%d cb=%d", idx, fw, fh,
+                            (int) (onDecoderRatioChangedCallback != nullptr));
+        if (onDecoderRatioChangedCallback != nullptr && fw != 0 && fh != 0) onDecoderRatioChangedCallback({fw, fh});
+    }
+
     MLOGD << "Configuring decoder:" << AMediaFormat_toString(format);
 
     auto status = AMediaCodec_configure(decoder.codec[idx], format, decoder.window[idx], nullptr, 0);
