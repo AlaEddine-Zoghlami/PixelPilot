@@ -2192,16 +2192,29 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
     @Override
     public void onBandwidthSettingChanged(int bandwidth) {
         int currentBandwidth = getBandwidth(this);
-        if (currentBandwidth == bandwidth) {
-            return;
-        }
         SharedPreferences prefs = getSharedPreferences("general", Context.MODE_PRIVATE);
-        SharedPreferences.Editor editor = prefs.edit();
-        editor.putInt("bandwidth", bandwidth);
-        editor.apply();
-        wfbLinkManager.stopAdapters();
-        wfbLinkManager.setBandwidth(bandwidth);
-        wfbLinkManager.startAdapters();
+        prefs.edit().putInt("bandwidth", bandwidth).apply();
+        // GS (VRX) RX side: WFB-ng mode tunes the dongle here (CHANNEL_WIDTH_20/40 via the link).
+        // APFPV station mode is pinned to 20 MHz for legal-DE compliance, so it's left alone.
+        if (!apfpvMode && currentBandwidth != bandwidth) {
+            wfbLinkManager.stopAdapters();
+            wfbLinkManager.setBandwidth(bandwidth);
+            wfbLinkManager.startAdapters();
+        }
+        // APFPV station (VRX RX): persist the width for the connect Params (apfpv_bandwidth ->
+        // ApfpvStation::Params.bandwidth -> StationMode connect width) and re-connect to apply it.
+        if (apfpvMode && currentBandwidth != bandwidth) {
+            getSharedPreferences("pixelpilot", MODE_PRIVATE).edit().putInt("apfpv_bandwidth", bandwidth).apply();
+            if (bandwidth > 20)
+                Toast.makeText(this, "40 MHz exceeds the DE 200 mW @ 20 MHz cap", Toast.LENGTH_LONG).show();
+            setLinkMode(linkMode);   // re-connect the station at the new width
+        }
+        // VTX (air) side: push .wireless.width over SSH in BOTH modes, mirroring the OpenIPC GS
+        // (gsmenu: `wifibroadcast cli -s .wireless.width`). One control => both ends, like the GS.
+        com.openipc.pixelpilot.apfpv.AirSshClient ssh = new com.openipc.pixelpilot.apfpv.AirSshClient();
+        ssh.useApfpvHost();   // 192.168.0.1 — same host the Air WFB-ng submenu uses
+        ssh.setWidth(bandwidth, (ok, out) -> runOnUiThread(() ->
+            Toast.makeText(this, "Air width -> " + bandwidth + (ok ? " MHz" : " FAILED"), Toast.LENGTH_SHORT).show()));
     }
 
     @Override
