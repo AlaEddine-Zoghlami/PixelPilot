@@ -2000,7 +2000,14 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         int w = root.getWidth(), h = root.getHeight();
         if (w <= 0 || h <= 0) return null;
         android.graphics.Bitmap bmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888);
+        // App chrome (settings gear + record button/indicator/label) is NOT part of the OSD — hide it
+        // for this offscreen draw, then restore. Restored synchronously so the screen (which only
+        // repaints on the next vsync) never shows the hidden state -> no on-screen flicker.
+        android.view.View[] chrome = { binding.btnSettings, binding.imgBtnRecord, binding.imgRecIndicator, binding.txtRecordLabel };
+        int[] vis = new int[chrome.length];
+        for (int i = 0; i < chrome.length; i++) { vis[i] = chrome[i].getVisibility(); chrome[i].setVisibility(View.INVISIBLE); }
         root.draw(new android.graphics.Canvas(bmp));
+        for (int i = 0; i < chrome.length; i++) chrome[i].setVisibility(vis[i]);
         return bmp;
     }
 
