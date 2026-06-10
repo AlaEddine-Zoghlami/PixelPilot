@@ -38,6 +38,49 @@ static int write_callback(int64_t offset, const void* buffer, size_t size, void*
     return fwrite(buffer, 1, size, f) != size;
 }
 
+// --- GL fan-out DVR mp4 writer. minimp4's MINIMP4_IMPLEMENTATION lives in this TU only (its guard
+// is disabled), so the GL-fan-out JNI calls these via extern "C" rather than re-including minimp4.h.
+// The fan-out encoder's NALUs (video, + the OSD when recordOsd) are muxed straight to the .mp4 fd.
+namespace {
+struct GlDvrW
+{
+    FILE*             fout     = nullptr;
+    MP4E_mux_t*       mux      = nullptr;
+    mp4_h26x_writer_t wr{};
+    int               fps      = 30;
+    bool              wrInited = false;
+};
+}  // namespace
+extern "C" void* glfanout_dvr_start(int fd, int w, int h, int fps, int fmp4, int h265)
+{
+    auto* d = new GlDvrW();
+    d->fps  = fps > 0 ? fps : 30;
+    d->fout = fdopen(fd, "wb");
+    if (!d->fout) { delete d; return nullptr; }
+    d->mux = MP4E_open(0 /*sequential*/, fmp4 ? 1 : 0, d->fout, write_callback);
+    if (!d->mux) { fclose(d->fout); delete d; return nullptr; }
+    if (mp4_h26x_write_init(&d->wr, d->mux, w, h, h265 != 0) != MP4E_STATUS_OK)
+    {
+        MP4E_close(d->mux); fclose(d->fout); delete d; return nullptr;
+    }
+    d->wrInited = true;
+    return d;
+}
+extern "C" void glfanout_dvr_write(void* dvr, const uint8_t* data, size_t size)
+{
+    auto* d = reinterpret_cast<GlDvrW*>(dvr);
+    if (d && d->wrInited) mp4_h26x_write_nal(&d->wr, data, size, 90000 / (d->fps > 0 ? d->fps : 30));
+}
+extern "C" void glfanout_dvr_stop(void* dvr)
+{
+    auto* d = reinterpret_cast<GlDvrW*>(dvr);
+    if (!d) return;
+    if (d->wrInited) mp4_h26x_write_close(&d->wr);
+    if (d->mux)  MP4E_close(d->mux);
+    if (d->fout) fclose(d->fout);
+    delete d;
+}
+
 void VideoPlayer::processQueue()
 {
     ::FILE*           fout = fdopen(dvr_fd, "wb");

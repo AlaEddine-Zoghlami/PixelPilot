@@ -9,6 +9,15 @@
 
 #define R(h) reinterpret_cast<GLFanoutRenderer*>(h)
 
+// GL fan-out DVR mp4 writer — implemented in VideoPlayer.cpp, which owns the single minimp4
+// MINIMP4_IMPLEMENTATION (its guard is disabled, so including minimp4.h here too would duplicate
+// every MP4E_* symbol at link). The fan-out encoder's NALUs (video, + OSD when recordOsd) flow
+// through these.
+extern "C" void* glfanout_dvr_start(int fd, int w, int h, int fps, int fmp4, int h265);
+extern "C" void  glfanout_dvr_write(void* dvr, const uint8_t* data, size_t size);
+extern "C" void  glfanout_dvr_stop(void* dvr);
+static void* g_glDvr = nullptr;
+
 extern "C" {
 
 JNIEXPORT jlong JNICALL
@@ -61,6 +70,28 @@ Java_com_openipc_videonative_GLFanoutManager_nativeRenderFrame(JNIEnv* env, jobj
 JNIEXPORT void JNICALL
 Java_com_openipc_videonative_GLFanoutManager_nativeRelease(JNIEnv*, jobject, jlong h) {
     if (h) delete R(h);
+}
+
+JNIEXPORT void JNICALL
+Java_com_openipc_videonative_GLFanoutManager_nativeStartDvr(
+    JNIEnv*, jobject, jlong h, jint fd, jint w, jint hh, jint fps, jint bitrate, jboolean fmp4, jboolean h265) {
+    if (!h || g_glDvr) return;
+    g_glDvr = glfanout_dvr_start((int) fd, (int) w, (int) hh, (int) fps,
+                                 fmp4 == JNI_TRUE ? 1 : 0, h265 == JNI_TRUE ? 1 : 0);
+    if (!g_glDvr) return;
+    // The cb runs on the encoder drain thread; the writer (g_glDvr) outlives it — stopDvr joins
+    // the drain thread before glfanout_dvr_stop frees it.
+    if (!R(h)->startDvr((int) w, (int) hh, (int) fps, (int) bitrate,
+                        [](const uint8_t* d, size_t s, bool) { glfanout_dvr_write(g_glDvr, d, s); },
+                        h265 == JNI_TRUE)) {
+        glfanout_dvr_stop(g_glDvr); g_glDvr = nullptr;
+    }
+}
+
+JNIEXPORT void JNICALL
+Java_com_openipc_videonative_GLFanoutManager_nativeStopDvr(JNIEnv*, jobject, jlong h) {
+    if (h) R(h)->stopDvr();   // flush EOS + join drain -> all NALUs written -> safe to free
+    if (g_glDvr) { glfanout_dvr_stop(g_glDvr); g_glDvr = nullptr; }
 }
 
 }  // extern "C"

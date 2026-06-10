@@ -222,6 +222,12 @@ public class VideoPlayer implements IVideoParamsChanged {
         return nativeVideoPlayer;
     }
 
+    /** The active GL fan-out (non-null only while the SurfaceView is up + GL init succeeded). The
+     *  DVR routes through it so the recording shares the live decode and can composite the OSD. */
+    public GLFanoutManager getGlFanout() {
+        return glFanout;
+    }
+
     // called by native code via NDK
     @Override
     @SuppressWarnings({"UnusedDeclaration"})

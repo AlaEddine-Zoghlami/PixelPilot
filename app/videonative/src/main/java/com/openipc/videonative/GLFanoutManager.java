@@ -89,6 +89,25 @@ public class GLFanoutManager implements SurfaceTexture.OnFrameAvailableListener 
         });
     }
 
+    /** Start the GL fan-out DVR: the shared decode is re-encoded (with the OSD composited when
+     *  recordOsd) into the .mp4 on the given fd. Runs on the GL thread (EGL surface creation). */
+    public void startDvr(final int fd, final int w, final int h, final int fps, final int bitrate,
+                         final boolean fmp4, final boolean h265, final boolean recordOsd, final Bitmap osd) {
+        if (glHandler == null) return;
+        glHandler.post(() -> {
+            if (nativeHandle == 0) return;
+            nativeSetRecordOsd(nativeHandle, recordOsd);
+            if (recordOsd && osd != null) nativeUpdateOsd(nativeHandle, osd);
+            nativeStartDvr(nativeHandle, fd, w, h, fps, bitrate, fmp4, h265);
+        });
+    }
+
+    public void stopDvr() {
+        if (glHandler != null) glHandler.post(() -> {
+            if (nativeHandle != 0) nativeStopDvr(nativeHandle);
+        });
+    }
+
     @Override
     public void onFrameAvailable(SurfaceTexture st) {   // runs on the GL thread (glHandler)
         if (nativeHandle == 0) return;
@@ -120,4 +139,6 @@ public class GLFanoutManager implements SurfaceTexture.OnFrameAvailableListener 
     private native void nativeUpdateOsd(long handle, Bitmap osd);
     private native void nativeRenderFrame(long handle, float[] texMatrix);
     private native void nativeRelease(long handle);
+    private native void nativeStartDvr(long handle, int fd, int w, int h, int fps, int bitrate, boolean fmp4, boolean h265);
+    private native void nativeStopDvr(long handle);
 }

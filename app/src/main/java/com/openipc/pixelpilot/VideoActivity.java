@@ -1496,6 +1496,18 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
             return false;
         });
 
+        MenuItem recOsd = recording.add("Record OSD");
+        recOsd.setCheckable(true);
+        recOsd.setChecked(getDvrRecordOsd());
+        recOsd.setOnMenuItemClickListener(item -> {
+            boolean enabled = getDvrRecordOsd();
+            item.setChecked(!enabled);
+            setDvrRecordOsd(!enabled);
+            item.setShowAsAction(MenuItem.SHOW_AS_ACTION_COLLAPSE_ACTION_VIEW);
+            item.setActionView(new View(this));
+            return false;
+        });
+
         MenuItem resetPermissions = recording.add("Reset DVR folder");
         resetPermissions.setOnMenuItemClickListener(item -> {
             resetFolderPermissions();
@@ -1738,7 +1750,18 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         }
         try {
             dvrFd = getContentResolver().openFileDescriptor(dvrUri, "rw");
-            videoPlayer.startDvr(dvrFd.getFd(), getDvrMP4());
+            com.openipc.videonative.GLFanoutManager fo = videoPlayer.getGlFanout();
+            dvrViaFanout = (fo != null && mDecodingInfo != null && lastVideoW > 0 && lastVideoH > 0);
+            if (dvrViaFanout) {
+                // GL fan-out DVR: shares the live decode; composites the OSD overlay when enabled.
+                int fps = (int) (mDecodingInfo.currentFPS > 0 ? mDecodingInfo.currentFPS : 30);
+                boolean h265 = mDecodingInfo.nCodec == 1;
+                boolean recordOsd = getDvrRecordOsd();
+                android.graphics.Bitmap osd = recordOsd ? captureOsdBitmap() : null;
+                fo.startDvr(dvrFd.getFd(), lastVideoW, lastVideoH, fps, 8000000, getDvrMP4(), h265, recordOsd, osd);
+            } else {
+                videoPlayer.startDvr(dvrFd.getFd(), getDvrMP4());
+            }
             binding.imgBtnRecord.setImageResource(R.drawable.recording);
         } catch (IOException e) {
             Log.e(TAG, "Failed to open dvr file ", e);
@@ -1775,7 +1798,13 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         }
         binding.imgRecIndicator.setVisibility(View.INVISIBLE);
         binding.imgBtnRecord.setImageResource(R.drawable.record);
-        videoPlayer.stopDvr();
+        if (dvrViaFanout) {
+            com.openipc.videonative.GLFanoutManager fo = videoPlayer.getGlFanout();
+            if (fo != null) fo.stopDvr();
+            dvrViaFanout = false;
+        } else {
+            videoPlayer.stopDvr();
+        }
         if (recordTimer != null) {
             recordTimer.cancel();
             recordTimer.purge();
@@ -1883,6 +1912,29 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
 
     public boolean getDvrMP4() {
         return getSharedPreferences("general", Context.MODE_PRIVATE).getBoolean("dvr_fmp4", true);
+    }
+
+    // GL fan-out DVR: tracks whether the active recording is routed through the fan-out (vs legacy).
+    private boolean dvrViaFanout = false;
+
+    public boolean getDvrRecordOsd() {
+        return getSharedPreferences("general", Context.MODE_PRIVATE).getBoolean("dvr_record_osd", false);
+    }
+
+    public void setDvrRecordOsd(boolean enabled) {
+        getSharedPreferences("general", Context.MODE_PRIVATE).edit().putBoolean("dvr_record_osd", enabled).apply();
+    }
+
+    /** Snapshot the on-screen OSD overlay as an RGBA_8888 Bitmap. The video is a SurfaceView and is
+     *  NOT drawn by View#draw, so this captures ONLY the overlay (telemetry/indicators) — exactly the
+     *  layer to composite into the DVR. Must run on the UI thread. */
+    private android.graphics.Bitmap captureOsdBitmap() {
+        android.view.View root = binding.getRoot();
+        int w = root.getWidth(), h = root.getHeight();
+        if (w <= 0 || h <= 0) return null;
+        android.graphics.Bitmap bmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888);
+        root.draw(new android.graphics.Canvas(bmp));
+        return bmp;
     }
 
     public void setDvrMP4(boolean enabled) {
