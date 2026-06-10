@@ -117,6 +117,7 @@ class GLFanoutRenderer
             glBindTexture(GL_TEXTURE_2D, osdTex_);
         }
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+        osdTexW_ = w; osdTexH_ = h;   // for aspect-preserving composite
     }
 
     // Per decoded frame (after SurfaceTexture.updateTexImage on the JNI side fills oesTex_).
@@ -192,18 +193,20 @@ class GLFanoutRenderer
         // OSD overlay program: a plain 2D RGBA texture (the captured OSD layer), alpha-blended
         // over the video in the DVR/encoder pass when recordOsd is on. Reuses the same quad VBO.
         static const char* OVS =
-            "attribute vec4 aPos; attribute vec2 aUV; varying vec2 vUV;"
+            "attribute vec4 aPos; attribute vec2 aUV; varying vec2 vUV; uniform vec2 uOsdScale;"
             // Flip V: the captured OSD Bitmap is top-down, the quad UV is bottom-up -> the overlay
-            // would otherwise composite upside-down (along the bottom instead of the top).
-            "void main(){ vUV=vec2(aUV.x, 1.0-aUV.y); gl_Position=aPos; }";
+            // would otherwise composite upside-down. uOsdScale preserves the OSD's aspect ratio in
+            // the (differently-shaped) video frame so circles stay circles (no vertical stretch).
+            "void main(){ vUV=vec2(aUV.x, 1.0-aUV.y); gl_Position=vec4(aPos.xy*uOsdScale, 0.0, 1.0); }";
         static const char* OFS =
             "precision mediump float; varying vec2 vUV; uniform sampler2D uOsd;"
             "void main(){ gl_FragColor = texture2D(uOsd, vUV); }";
         osdProg_ = link(OVS, OFS);
         if (osdProg_) {
-            osdPos_    = glGetAttribLocation(osdProg_, "aPos");
-            osdUV_     = glGetAttribLocation(osdProg_, "aUV");
-            osdTexLoc_ = glGetUniformLocation(osdProg_, "uOsd");
+            osdPos_      = glGetAttribLocation(osdProg_, "aPos");
+            osdUV_       = glGetAttribLocation(osdProg_, "aUV");
+            osdTexLoc_   = glGetUniformLocation(osdProg_, "uOsd");
+            osdScaleLoc_ = glGetUniformLocation(osdProg_, "uOsdScale");
         }
         return true;
     }
@@ -243,6 +246,15 @@ class GLFanoutRenderer
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
             glUseProgram(osdProg_);
+            // Preserve the OSD's aspect in the video frame: the OSD is captured at the phone screen
+            // aspect (e.g. 20:9) but the recording is 16:9, so stretch-to-fill turns circles into
+            // ovals. Fit the OSD into the frame (letterbox) keeping its own aspect.
+            float sx = 1.f, sy = 1.f;
+            if (osdTexW_ > 0 && osdTexH_ > 0 && vpW_ > 0 && vpH_ > 0) {
+                float osdA = (float) osdTexW_ / (float) osdTexH_, vpA = (float) vpW_ / (float) vpH_;
+                if (osdA > vpA) sy = vpA / osdA; else sx = osdA / vpA;
+            }
+            glUniform2f(osdScaleLoc_, sx, sy);
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, osdTex_);
             glUniform1i(osdTexLoc_, 0);
@@ -268,8 +280,9 @@ class GLFanoutRenderer
     EGLSurface encSurfRaw_ = EGL_NO_SURFACE;
     GLuint     prog_ = 0, osdProg_ = 0, oesTex_ = 0, osdTex_ = 0, vbo_ = 0;
     GLint      aPos_ = -1, aUV_ = -1, uTex_ = -1, uTexOes_ = -1;
-    GLint      osdPos_ = -1, osdUV_ = -1, osdTexLoc_ = -1;
+    GLint      osdPos_ = -1, osdUV_ = -1, osdTexLoc_ = -1, osdScaleLoc_ = -1;
     EGLint     vpW_ = 0, vpH_ = 0;
+    int        osdTexW_ = 0, osdTexH_ = 0;
     std::atomic<bool> ready_{false};
     std::atomic<bool> recordOsd_{false};
     GLFanoutEncoder   encoder_;

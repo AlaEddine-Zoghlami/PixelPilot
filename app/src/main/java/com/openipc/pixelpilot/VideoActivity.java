@@ -1997,17 +1997,35 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
      *  layer to composite into the DVR. Must run on the UI thread. */
     private android.graphics.Bitmap captureOsdBitmap() {
         android.view.View root = binding.getRoot();
-        int w = root.getWidth(), h = root.getHeight();
-        if (w <= 0 || h <= 0) return null;
-        android.graphics.Bitmap bmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888);
-        // App chrome (settings gear + record button/indicator/label) is NOT part of the OSD — hide it
-        // for this offscreen draw, then restore. Restored synchronously so the screen (which only
-        // repaints on the next vsync) never shows the hidden state -> no on-screen flicker.
-        android.view.View[] chrome = { binding.btnSettings, binding.imgBtnRecord, binding.imgRecIndicator, binding.txtRecordLabel };
-        int[] vis = new int[chrome.length];
-        for (int i = 0; i < chrome.length; i++) { vis[i] = chrome[i].getVisibility(); chrome[i].setVisibility(View.INVISIBLE); }
-        root.draw(new android.graphics.Canvas(bmp));
-        for (int i = 0; i < chrome.length; i++) chrome[i].setVisibility(vis[i]);
+        int sw = root.getWidth(), sh = root.getHeight();
+        if (sw <= 0 || sh <= 0) return null;
+        int vw = videoPlayer.getVideoWidth(), vh = videoPlayer.getVideoHeight();
+        if (vw <= 0 || vh <= 0) { vw = sw; vh = sh; }
+        // Render the OSD at the VIDEO's aspect (not the 20:9 phone screen) so the recorded overlay
+        // matches what's on screen: each element keeps its % position from the edges (scale the
+        // CENTER per-axis) but its true, undistorted size (one UNIFORM size scale). A flat
+        // full-screen capture stretched 20:9 -> 16:9 turned circles into ovals. Drawing only the
+        // OSD items (not the root) also drops app chrome (the settings gear) for free.
+        android.graphics.Bitmap bmp = android.graphics.Bitmap.createBitmap(vw, vh, android.graphics.Bitmap.Config.ARGB_8888);
+        android.graphics.Canvas c = new android.graphics.Canvas(bmp);
+        float sx = (float) vw / sw, sy = (float) vh / sh;   // position scale: keeps % from each edge
+        float ss = Math.min(sx, sy);                        // uniform size scale: no stretch
+        int[] rootLoc = new int[2]; root.getLocationInWindow(rootLoc);
+        if (osdManager != null && osdManager.listOSDItems != null) {
+            for (com.openipc.pixelpilot.osd.OSDElement el : osdManager.listOSDItems) {
+                android.view.View v = el.layout;
+                if (v == null || v.getVisibility() != View.VISIBLE || v.getWidth() <= 0 || v.getHeight() <= 0) continue;
+                int[] loc = new int[2]; v.getLocationInWindow(loc);
+                float cx = (loc[0] - rootLoc[0]) + v.getWidth() / 2f;
+                float cy = (loc[1] - rootLoc[1]) + v.getHeight() / 2f;
+                float ncx = cx * sx, ncy = cy * sy;         // element center, % preserved
+                int save = c.save();
+                c.translate(ncx - v.getWidth() * ss / 2f, ncy - v.getHeight() * ss / 2f);
+                c.scale(ss, ss);
+                v.draw(c);
+                c.restoreToCount(save);
+            }
+        }
         return bmp;
     }
 
