@@ -118,28 +118,32 @@ public class OSDManager {
             element.layout.restorePosition(element.prefName());
             element.layout.setMovable(!isOSDLocked());
         }
-        for (OSDElement element : listOSDItems) tightenIcons(element.layout);
+        for (OSDElement element : listOSDItems) {
+            // Center children vertically so a wrapped icon lines up with the text (else the smaller
+            // icon top-aligns against taller text — the video-stats "icon on top" problem).
+            element.layout.setGravity(android.view.Gravity.START | android.view.Gravity.CENTER_VERTICAL);
+            tightenViews(element.layout);
+        }
         osdBoxes = isBoxesEnabled();
         applyBoxes();
     }
 
-    // Make icon ImageViews hug their drawable (adjustViewBounds + wrap height) instead of sitting in
-    // a fixed-tall view with built-in whitespace — so element height = the visible glyph, and the
-    // box wraps it tightly with even margins. Covers every element incl. the video-stats monitor icon.
-    private void tightenIcons(android.view.View v) {
+    // Make element height = the visible glyph so the box wraps it tightly with even margins:
+    // ImageViews hug their drawable (adjustViewBounds + wrap height); fixed-height TextViews (e.g.
+    // the 38dp video-stats line) wrap too. Covers every element incl. the video-stats row.
+    private void tightenViews(android.view.View v) {
+        android.view.ViewGroup.LayoutParams lp = v.getLayoutParams();
         if (v instanceof android.widget.ImageView) {
             android.widget.ImageView iv = (android.widget.ImageView) v;
             if (iv.getDrawable() != null) {
                 iv.setAdjustViewBounds(true);
-                android.view.ViewGroup.LayoutParams lp = iv.getLayoutParams();
-                if (lp != null && lp.height != android.view.ViewGroup.LayoutParams.WRAP_CONTENT) {
-                    lp.height = android.view.ViewGroup.LayoutParams.WRAP_CONTENT;
-                    iv.setLayoutParams(lp);
-                }
+                if (lp != null && lp.height > 0) { lp.height = android.view.ViewGroup.LayoutParams.WRAP_CONTENT; iv.setLayoutParams(lp); }
             }
+        } else if (v instanceof android.widget.TextView) {
+            if (lp != null && lp.height > 0) { lp.height = android.view.ViewGroup.LayoutParams.WRAP_CONTENT; v.setLayoutParams(lp); }
         } else if (v instanceof android.view.ViewGroup) {
             android.view.ViewGroup g = (android.view.ViewGroup) v;
-            for (int i = 0; i < g.getChildCount(); i++) tightenIcons(g.getChildAt(i));
+            for (int i = 0; i < g.getChildCount(); i++) tightenViews(g.getChildAt(i));
         }
     }
 
@@ -166,8 +170,7 @@ public class OSDManager {
                 tightenText(el.layout, true);
                 android.graphics.drawable.GradientDrawable box = new android.graphics.drawable.GradientDrawable();
                 box.setColor(0x66000000);              // 40% black: readable over bright video, still see-through
-                box.setCornerRadius(4 * density);      // ~4dp rounded corners
-                el.layout.setBackground(box);
+                el.layout.setBackground(box);          // square corners (no radius)
                 el.layout.setPadding(pad, pad, pad, pad);
             } else {
                 tightenText(el.layout, false);
