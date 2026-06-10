@@ -720,6 +720,18 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
             return false;
         });
 
+        MenuItem boxes = osd.add("Element boxes");
+        boxes.setCheckable(true);
+        boxes.setChecked(osdManager.isBoxesEnabled());
+        boxes.setOnMenuItemClickListener(item -> {
+            boolean en = !osdManager.isBoxesEnabled();
+            item.setChecked(en);
+            osdManager.setBoxes(en);
+            item.setShowAsAction(MenuItem.SHOW_AS_ACTION_COLLAPSE_ACTION_VIEW);
+            item.setActionView(new View(this));
+            return false;
+        });
+
         for (OSDElement element : osdManager.listOSDItems) {
             MenuItem itm = osd.add(element.name);
             itm.setCheckable(true);

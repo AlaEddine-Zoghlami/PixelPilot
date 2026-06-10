@@ -30,6 +30,7 @@ public class OSDManager {
     private boolean isFlying = false;
     private CountDownTimer mCountDownTimer;
     private boolean osdLocked = true;
+    private boolean osdBoxes = false;
 
     public OSDManager(Context context, ActivityVideoBinding binding) {
         this.binding = binding;
@@ -116,6 +117,37 @@ public class OSDManager {
             onOSDItemCheckChanged(element, enabled);
             element.layout.restorePosition(element.prefName());
             element.layout.setMovable(!isOSDLocked());
+        }
+        osdBoxes = isBoxesEnabled();
+        applyBoxes();
+    }
+
+    /** Whether OSD elements get a semi-transparent box behind them for readability over the video. */
+    public boolean isBoxesEnabled() {
+        return context.getSharedPreferences("osd_config", MODE_PRIVATE).getBoolean("osd_boxes", false);
+    }
+
+    public void setBoxes(boolean on) {
+        osdBoxes = on;
+        context.getSharedPreferences("osd_config", MODE_PRIVATE).edit().putBoolean("osd_boxes", on).apply();
+        applyBoxes();
+    }
+
+    private void applyBoxes() {
+        if (listOSDItems == null) return;
+        float density = context.getResources().getDisplayMetrics().density;
+        int pad = (int) (5 * density + 0.5f);          // ~5dp breathing room around the content
+        for (OSDElement el : listOSDItems) {
+            if (osdBoxes) {
+                android.graphics.drawable.GradientDrawable box = new android.graphics.drawable.GradientDrawable();
+                box.setColor(0x66000000);              // 40% black: readable over bright video, still see-through
+                box.setCornerRadius(4 * density);      // ~4dp rounded corners
+                el.layout.setBackground(box);
+                el.layout.setPadding(pad, pad, pad, pad);
+            } else {
+                el.layout.setBackground(null);
+                el.layout.setPadding(0, 0, 0, 0);
+            }
         }
     }
 
