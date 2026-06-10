@@ -1496,13 +1496,24 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
             return false;
         });
 
-        MenuItem recOsd = recording.add("Record OSD");
-        recOsd.setCheckable(true);
-        recOsd.setChecked(getDvrRecordOsd());
-        recOsd.setOnMenuItemClickListener(item -> {
-            boolean enabled = getDvrRecordOsd();
-            item.setChecked(!enabled);
-            setDvrRecordOsd(!enabled);
+        // Record mode: 0=Raw (clean), 1=OSD (overlay composited), 2=Raw+OSD (both -> two files).
+        SubMenu modeMenu = recording.addSubMenu("Record mode");
+        final String[] modeNames = {"Raw", "OSD", "Raw + OSD"};
+        for (int mi = 0; mi < modeNames.length; mi++) {
+            final int mode = mi;
+            MenuItem it = modeMenu.add(modeNames[mi]);
+            it.setCheckable(true);
+            it.setChecked(getDvrRecordMode() == mode);
+            it.setOnMenuItemClickListener(item -> { setDvrRecordMode(mode); item.setChecked(true); return true; });
+        }
+
+        MenuItem autoDvr = recording.add("Auto DVR");
+        autoDvr.setCheckable(true);
+        autoDvr.setChecked(getDvrAuto());
+        autoDvr.setOnMenuItemClickListener(item -> {
+            boolean en = !getDvrAuto();
+            item.setChecked(en); setDvrAuto(en);
+            if (en) startAutoDvrWatcher(); else stopAutoDvrWatcher();
             item.setShowAsAction(MenuItem.SHOW_AS_ACTION_COLLAPSE_ACTION_VIEW);
             item.setActionView(new View(this));
             return false;
@@ -1726,6 +1737,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         if (dvrFd == null) {
             Uri dvrUri = openDvrFile();
             if (dvrUri != null) {
+                userStoppedDvr = false;
                 startDvr(dvrUri);
             } else {
                 wfbLinkManager.stopAdapters();
@@ -1740,6 +1752,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
                 startActivityForResult(intent, PICK_DVR_REQUEST_CODE);
             }
         } else {
+            userStoppedDvr = true;  // manual stop: Auto-DVR won't re-arm until the stream drops + returns
             stopDvr();
         }
     }
@@ -1757,7 +1770,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
             if (dvrViaFanout) {
                 // GL fan-out DVR: shares the live decode; composites the OSD overlay when enabled.
                 int fps = videoPlayer.getVideoFps() > 0 ? videoPlayer.getVideoFps() : 30;
-                boolean recordOsd = getDvrRecordOsd();
+                boolean recordOsd = (getDvrRecordMode() != 0);  // Raw=0 clean; OSD/Raw+OSD composite (Raw+OSD 2nd raw file = dual-encoder follow-up)
                 android.graphics.Bitmap osd = recordOsd ? captureOsdBitmap() : null;
                 fo.startDvr(dvrFd.getFd(), vw, vh, fps, 8000000, getDvrMP4(), false, recordOsd, osd);  // DVR re-encodes to H.264
                 if (recordOsd) startOsdUpdateTimer();  // keep the recorded OSD live (telemetry/GPS change)
@@ -1932,6 +1945,40 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         getSharedPreferences("general", Context.MODE_PRIVATE).edit().putBoolean("dvr_record_osd", enabled).apply();
     }
 
+    // Record mode: 0=Raw, 1=OSD, 2=Raw+OSD. (Raw+OSD records two files; raw stream is the dual-
+    // encoder follow-up — see apfpv-dvr-recordmode-autodvr memory.)
+    public int getDvrRecordMode() { return getSharedPreferences("general", Context.MODE_PRIVATE).getInt("dvr_record_mode", 1); }
+    public void setDvrRecordMode(int m) { getSharedPreferences("general", Context.MODE_PRIVATE).edit().putInt("dvr_record_mode", m).apply(); }
+    public boolean getDvrAuto() { return getSharedPreferences("general", Context.MODE_PRIVATE).getBoolean("dvr_auto", false); }
+    public void setDvrAuto(boolean e) { getSharedPreferences("general", Context.MODE_PRIVATE).edit().putBoolean("dvr_auto", e).apply(); }
+
+    // Auto-DVR: ~1 Hz watcher of the live stream (decoder W/H + fps). Starts recording when a
+    // stream appears, auto-stops ~3s after it drops (device/remote off). A manual Stop sets
+    // userStoppedDvr so it won't immediately re-arm; that clears when the stream drops + returns.
+    private Timer autoDvrTimer;
+    private int autoNoStream;
+    private boolean userStoppedDvr;
+    private void startAutoDvrWatcher() {
+        if (autoDvrTimer != null) autoDvrTimer.cancel();
+        autoDvrTimer = new Timer(); autoNoStream = 0;
+        autoDvrTimer.schedule(new TimerTask() {
+            @Override public void run() {
+                runOnUiThread(() -> {
+                    if (!getDvrAuto()) return;
+                    boolean live = videoPlayer != null && videoPlayer.getVideoWidth() > 0 && videoPlayer.getVideoFps() > 0;
+                    if (live) {
+                        autoNoStream = 0;
+                        if (dvrFd == null && !userStoppedDvr) { Uri u = openDvrFile(); if (u != null) startDvr(u); }
+                    } else if (++autoNoStream >= 3) {
+                        if (dvrFd != null) stopDvr();   // stream gone -> auto-stop
+                        userStoppedDvr = false;          // a returning stream may auto-start again
+                    }
+                });
+            }
+        }, 1000, 1000);
+    }
+    private void stopAutoDvrWatcher() { if (autoDvrTimer != null) { autoDvrTimer.cancel(); autoDvrTimer = null; } }
+
     /** Snapshot the on-screen OSD overlay as an RGBA_8888 Bitmap. The video is a SurfaceView and is
      *  NOT drawn by View#draw, so this captures ONLY the overlay (telemetry/indicators) — exactly the
      *  layer to composite into the DVR. Must run on the UI thread. */
@@ -2068,6 +2115,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         }
         videoPlayer.start();
         videoPlayer.startAudio();
+        if (getDvrAuto()) startAutoDvrWatcher();
 
         osdManager.restoreOSDConfig();
 
