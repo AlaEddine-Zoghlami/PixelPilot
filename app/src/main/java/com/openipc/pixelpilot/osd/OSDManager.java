@@ -136,18 +136,34 @@ public class OSDManager {
     private void applyBoxes() {
         if (listOSDItems == null) return;
         float density = context.getResources().getDisplayMetrics().density;
-        int pad = (int) (5 * density + 0.5f);          // ~5dp breathing room around the content
+        int padH = (int) (6 * density + 0.5f);   // left/right breathing room
+        // Tighter top/bottom: the OSD icons (e.g. the 16x38dp gauge) and TextView font padding
+        // already carry built-in vertical whitespace, so EQUAL padding renders top/bottom-heavy.
+        // A smaller vertical pad makes the visible margin match left/right.
+        int padV = (int) (2 * density + 0.5f);
         for (OSDElement el : listOSDItems) {
             if (osdBoxes) {
+                // Drop TextView font padding so the box hugs the text symmetrically (esp. video stats).
+                tightenText(el.layout, true);
                 android.graphics.drawable.GradientDrawable box = new android.graphics.drawable.GradientDrawable();
                 box.setColor(0x66000000);              // 40% black: readable over bright video, still see-through
                 box.setCornerRadius(4 * density);      // ~4dp rounded corners
                 el.layout.setBackground(box);
-                el.layout.setPadding(pad, pad, pad, pad);
+                el.layout.setPadding(padH, padV, padH, padV);
             } else {
+                tightenText(el.layout, false);
                 el.layout.setBackground(null);
                 el.layout.setPadding(0, 0, 0, 0);
             }
+        }
+    }
+
+    private void tightenText(android.view.View v, boolean tight) {
+        if (v instanceof android.widget.TextView) {
+            ((android.widget.TextView) v).setIncludeFontPadding(!tight);
+        } else if (v instanceof android.view.ViewGroup) {
+            android.view.ViewGroup g = (android.view.ViewGroup) v;
+            for (int i = 0; i < g.getChildCount(); i++) tightenText(g.getChildAt(i), tight);
         }
     }
 
