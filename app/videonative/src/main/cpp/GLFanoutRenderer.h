@@ -178,7 +178,9 @@ class GLFanoutRenderer
         // over the video in the DVR/encoder pass when recordOsd is on. Reuses the same quad VBO.
         static const char* OVS =
             "attribute vec4 aPos; attribute vec2 aUV; varying vec2 vUV;"
-            "void main(){ vUV=aUV; gl_Position=aPos; }";
+            // Flip V: the captured OSD Bitmap is top-down, the quad UV is bottom-up -> the overlay
+            // would otherwise composite upside-down (along the bottom instead of the top).
+            "void main(){ vUV=vec2(aUV.x, 1.0-aUV.y); gl_Position=aPos; }";
         static const char* OFS =
             "precision mediump float; varying vec2 vUV; uniform sampler2D uOsd;"
             "void main(){ gl_FragColor = texture2D(uOsd, vUV); }";

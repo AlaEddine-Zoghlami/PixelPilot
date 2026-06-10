@@ -1760,6 +1760,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
                 boolean recordOsd = getDvrRecordOsd();
                 android.graphics.Bitmap osd = recordOsd ? captureOsdBitmap() : null;
                 fo.startDvr(dvrFd.getFd(), vw, vh, fps, 8000000, getDvrMP4(), false, recordOsd, osd);  // DVR re-encodes to H.264
+                if (recordOsd) startOsdUpdateTimer();  // keep the recorded OSD live (telemetry/GPS change)
             } else {
                 videoPlayer.startDvr(dvrFd.getFd(), getDvrMP4());
             }
@@ -1799,6 +1800,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         }
         binding.imgRecIndicator.setVisibility(View.INVISIBLE);
         binding.imgBtnRecord.setImageResource(R.drawable.record);
+        if (osdUpdateTimer != null) { osdUpdateTimer.cancel(); osdUpdateTimer = null; }
         if (dvrViaFanout) {
             com.openipc.videonative.GLFanoutManager fo = videoPlayer.getGlFanout();
             if (fo != null) fo.stopDvr();
@@ -1940,6 +1942,22 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         android.graphics.Bitmap bmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888);
         root.draw(new android.graphics.Canvas(bmp));
         return bmp;
+    }
+
+    private Timer osdUpdateTimer;
+    /** Re-capture the OSD overlay ~2x/sec while recording so the recorded layer stays live (the
+     *  telemetry/GPS values change). Runs on the UI thread (View#draw); updateOsd hops to the GL thread. */
+    private void startOsdUpdateTimer() {
+        if (osdUpdateTimer != null) osdUpdateTimer.cancel();
+        osdUpdateTimer = new Timer();
+        osdUpdateTimer.schedule(new TimerTask() {
+            @Override public void run() {
+                runOnUiThread(() -> {
+                    com.openipc.videonative.GLFanoutManager fo = videoPlayer.getGlFanout();
+                    if (dvrViaFanout && fo != null) { android.graphics.Bitmap b = captureOsdBitmap(); if (b != null) fo.updateOsd(b); }
+                });
+            }
+        }, 500, 500);
     }
 
     public void setDvrMP4(boolean enabled) {
