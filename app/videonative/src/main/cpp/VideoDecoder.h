@@ -119,11 +119,11 @@ class VideoDecoder
     // MediaTek SoC? The stale-frame flush is MTK-only (the MTK HW decoder is the one that backs up
     // on a lossy link). Set from ro.board.platform in configureStartDecoder.
     bool                         mIsMtk = false;
-    // Stale-frame flush threshold (ms). 0 = off. MTK-only; configurable from the settings menu
-    // (the item is shown only on MTK). Default 60 ms (matches the MTK-Optimized fork). When a
-    // decoded frame is later than this we drop-to-keyframe instead of rendering late + growing
-    // latency. Set from JNI via setFlushThresholdMs(); plain int (benign 1-frame race on retune).
-    int                          mFlushThresholdMs = 60;
+    // Stale-frame flush threshold (ms). 0 = off (DEFAULT). MTK-only; configurable from the settings
+    // menu (shown only on MTK). When a decoded frame is later than this, flush to the next keyframe.
+    // Default off so the baseline never drops frames; opt-in via the menu. Set from JNI via
+    // setFlushThresholdMs(); plain int (benign 1-frame race on retune).
+    int                          mFlushThresholdMs = 0;
     // Holds the AMediaCodec instance, as well as the state (configured or not configured)
     Decoder      decoder{};
     DecodingInfo decodingInfo;

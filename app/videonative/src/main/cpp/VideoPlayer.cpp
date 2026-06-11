@@ -289,7 +289,7 @@ void VideoPlayer::start(JNIEnv* env, jobject androidContext)
         "UDS‑Rx",  // thread name
         -16,       // Android priority
         [this](const uint8_t* data, size_t data_length) { onNewRTPData(data, data_length); },
-        WANTED_UDP_RCVBUF_SIZE  // your desired recv‑buffer size
+        WANTED_UDP_RCVBUF_SIZE  // recv-buffer size
     );
 
     mUDSReceiver->startReceiving();

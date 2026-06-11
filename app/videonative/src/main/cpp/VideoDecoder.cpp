@@ -196,25 +196,23 @@ void VideoDecoder::configureStartDecoder(int idx)
         char plat[PROP_VALUE_MAX] = {0};
         __system_property_get("persist.pixelpilot.mtkopt", gate);
         __system_property_get("ro.board.platform", plat);
-        mLowLatencyOpt   = (gate[0] != '0');                       // default ON unless explicitly "0"
+        mLowLatencyOpt   = (gate[0] == '1');                       // default OFF; opt-in: setprop ... 1
         mIsMtk           = std::string(plat).rfind("mt", 0) == 0;
         const bool isMtk = mIsMtk;
         if (mLowLatencyOpt)
         {
+            // Opt-in low-latency MediaFormat tuning. These do NOT drop frames (no buffer-count
+            // shrink — that starved the decoder); they only ask the decoder to run low-latency.
+            // Default-off so the baseline matches the known-good (2026-06-09) behaviour.
             AMediaFormat_setInt32(format, "low-latency", 1);       // PARAMETER_KEY_LOW_LATENCY
             AMediaFormat_setInt32(format, "priority", 0);          // 0 = realtime
             AMediaFormat_setInt32(format, "operating-rate", 240);  // run the HW decoder flat-out
-            // Small queues = less buffered latency. 4 (vs the fork's 3) keeps a touch of headroom
-            // for the lossy RF link without letting a deep backlog accumulate.
-            AMediaFormat_setInt32(format, "android._num-input-buffers", 4);
-            AMediaFormat_setInt32(format, "android._num-output-buffers", 4);
             if (isMtk)
             {
                 AMediaFormat_setInt32(format, "vendor.mtk-videodec-low-latency", 1);
             }
             __android_log_print(ANDROID_LOG_INFO, "VideoDecoder",
-                "FPV latency-priority decode ON (mtk=%d, flush=%dms; 0=off)", (int) isMtk,
-                mFlushThresholdMs);
+                "FPV low-latency opt-in ON (mtk=%d, flush=%dms; 0=off)", (int) isMtk, mFlushThresholdMs);
         }
     }
     // -----------------------------------------------------------------------------------------
@@ -360,9 +358,28 @@ void VideoDecoder::checkOutputLoop(int idx)
     while (!decoderSawEOS && !decoderProducedUnknown)
     {
         if (!decoder.codec[idx]) break;
-        const ssize_t index = AMediaCodec_dequeueOutputBuffer(decoder.codec[idx], &info, BUFFER_TIMEOUT_US);
+        ssize_t index = AMediaCodec_dequeueOutputBuffer(decoder.codec[idx], &info, BUFFER_TIMEOUT_US);
         if (index >= 0)
         {
+            // FPV latency priority: render ONLY the freshest decoded frame. On a bursty/lossy link
+            // MediaCodec queues several decoded frames; rendering them all in order replays an
+            // ever-growing backlog of OLD frames (the "rewind / stuck on old frames" the dongle
+            // showed). So if newer output buffers are already ready, drop the stale ones WITHOUT
+            // rendering and jump to the latest. No keyframe flush => fps does not collapse and the
+            // picture stays live. On a clean link (phone-wifi) nothing newer is waiting, so every
+            // frame still renders normally.
+            if (mLowLatencyOpt && idx == 0)
+            {
+                AMediaCodecBufferInfo ni;
+                ssize_t               nextIdx;
+                while (decoder.codec[idx]
+                       && (nextIdx = AMediaCodec_dequeueOutputBuffer(decoder.codec[idx], &ni, 0)) >= 0)
+                {
+                    AMediaCodec_releaseOutputBuffer(decoder.codec[idx], (size_t) index, false);  // drop stale
+                    index = nextIdx;
+                    info  = ni;
+                }
+            }
             const auto    now   = steady_clock::now();
             const int64_t nowUS = (int64_t) duration_cast<microseconds>(now.time_since_epoch()).count();
             // the timestamp for releasing the buffer is in NS, just release as fast as possible (e.g. now)
@@ -372,11 +389,11 @@ void VideoDecoder::checkOutputLoop(int idx)
             //-> Message kWhatReleaseOutputBuffer -> onReleaseOutputBuffer
             //  also https://android.googlesource.com/platform/frameworks/native/+/5c1139f/libs/gui/SurfaceTexture.cpp
             if (!decoder.codec[idx]) break;
-            // FPV latency priority (MediaTek only): if this frame is already stale (a backlog built
-            // up on the lossy RF link), flush to the next keyframe instead of rendering late frames
-            // and letting latency grow unbounded. Threshold is the menu-configurable mFlushThresholdMs
-            // (0 = off). The buffer index is invalidated by flush, so skip render+stats.
-            if (mLowLatencyOpt && mIsMtk && mFlushThresholdMs > 0 && idx == 0 &&
+            // Menu-controlled flush (MediaTek only, independent of the low-latency opt-in): if a
+            // decoded frame is older than mFlushThresholdMs (settings menu; DEFAULT 0 = off), flush
+            // to the next keyframe to cap latency / clear corruption. Off by default so the baseline
+            // never drops frames. The buffer index is invalidated by flush, so skip render+stats.
+            if (mIsMtk && mFlushThresholdMs > 0 && idx == 0 &&
                 (nowUS - info.presentationTimeUs) > (int64_t) mFlushThresholdMs * 1000)
             {
                 AMediaCodec_flush(decoder.codec[idx]);

@@ -301,6 +301,26 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_HIDE_NAVIGATION);
 
+        // FPV wants the highest refresh the panel supports (e.g. 120 Hz). Otherwise Android may keep
+        // it at 60 Hz (power-save, no app request, or while screen-casting), which caps VISIBLE fps at
+        // 60 and — with a 120 fps source — backs the GL render queue up into stale/old frames. Request
+        // the max-refresh display mode at the current resolution.
+        try {
+            android.view.Display disp = getWindowManager().getDefaultDisplay();
+            android.view.Display.Mode cur = disp.getMode();
+            android.view.Display.Mode best = cur;
+            for (android.view.Display.Mode m : disp.getSupportedModes()) {
+                if (m.getPhysicalWidth() == cur.getPhysicalWidth()
+                    && m.getPhysicalHeight() == cur.getPhysicalHeight()
+                    && m.getRefreshRate() > best.getRefreshRate()) best = m;
+            }
+            WindowManager.LayoutParams lp = getWindow().getAttributes();
+            lp.preferredDisplayModeId = best.getModeId();
+            getWindow().setAttributes(lp);
+            Log.i(TAG, "Requested display mode " + best.getPhysicalWidth() + "x"
+                + best.getPhysicalHeight() + "@" + best.getRefreshRate() + "Hz");
+        } catch (Throwable t) { Log.w(TAG, "refresh-rate request failed: " + t); }
+
         wifiManager = (WifiManager) getSystemService(WIFI_SERVICE);
     }
 
@@ -722,9 +742,10 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         return hw.startsWith("mt") || bd.startsWith("mt");
     }
 
-    /** Menu-configured MTK stale-frame flush threshold in ms (0 = off). Default 60. */
+    /** Menu-configured MTK stale-frame flush threshold in ms (0 = off). Default off — the baseline
+     *  never drops frames; enable from the menu only if you want latency-capping. */
     static int getVideoFlushMs(Context ctx) {
-        return ctx.getSharedPreferences("general", Context.MODE_PRIVATE).getInt("video_flush_ms", 60);
+        return ctx.getSharedPreferences("general", Context.MODE_PRIVATE).getInt("video_flush_ms", 0);
     }
 
     /**
