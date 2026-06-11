@@ -168,16 +168,28 @@ void VideoDecoder::configureStartDecoder(int idx)
     {
         char platform[PROP_VALUE_MAX] = {0};
         char sdkStr[PROP_VALUE_MAX]   = {0};
+        char hwHevc[PROP_VALUE_MAX]   = {0};
         __system_property_get("ro.board.platform", platform);
         __system_property_get("ro.build.version.sdk", sdkStr);
+        __system_property_get("debug.pixelpilot.hwhevc", hwHevc);   // "1" = keep the MTK HW HEVC decoder
         std::string plat(platform);
-        if (plat.rfind("mt", 0) == 0 && atoi(sdkStr) >= 35)
+        // The SW HEVC fallback is only needed when the MTK HW HEVC renders black to a DIRECT
+        // SurfaceView. We render via the GL fan-out (SurfaceTexture->GL), where the HW HEVC renders
+        // correctly — and SW HEVC is ~8 ms/frame (CPU-bound, can't sustain 720p120 => "slow"/stutter).
+        // So `setprop debug.pixelpilot.hwhevc 1` keeps the fast HW HEVC decoder for testing; default
+        // still forces SW (safe). If HW renders cleanly via GL on this SoC, this becomes the default.
+        if (hwHevc[0] != '1' && plat.rfind("mt", 0) == 0 && atoi(sdkStr) >= 35)
         {
             __android_log_print(ANDROID_LOG_WARN, "VideoDecoder",
                 "MediaTek SoC '%s' HEVC HW decoder renders black -> forcing SW c2.android.hevc.decoder", plat.c_str());
             AMediaCodec_delete(decoder.codec[idx]);
             AMediaCodec* sw = AMediaCodec_createCodecByName("c2.android.hevc.decoder");
             decoder.codec[idx] = (sw != nullptr) ? sw : AMediaCodec_createDecoderByType(MIME.c_str());
+        }
+        else if (hwHevc[0] == '1')
+        {
+            __android_log_print(ANDROID_LOG_WARN, "VideoDecoder",
+                "debug.pixelpilot.hwhevc=1 -> keeping MTK HW HEVC decoder (GL fan-out renders it; ~8x faster than SW)");
         }
     }
 
@@ -188,22 +200,20 @@ void VideoDecoder::configureStartDecoder(int idx)
     // Adapted from the PixelPilot-MTK-Optimized fork (thamtrung151). For FPV we prioritise glass-
     // to-glass latency over smoothness: real-time priority, low-latency decode, small buffer queues
     // (less queuing delay), and — on MediaTek — the vendor low-latency key + a high operating-rate.
-    // Gated so it can be A/B'd at runtime WITHOUT a rebuild: `setprop persist.pixelpilot.mtkopt 0`
-    // restores the legacy behaviour (no keys set). Default ON. Generic keys (low-latency/priority)
-    // are documented as harmless on devices that ignore them; the vendor.mtk key is SoC-gated.
+    // Gated so it can be A/B'd at runtime WITHOUT a rebuild: `setprop debug.pixelpilot.mtkopt 1`
+    // enables it, `0`/unset = default-off legacy. (debug.* is shell-settable on non-rooted devices;
+    // a custom persist.* is blocked by SELinux.) Generic keys (low-latency/priority) are harmless on
+    // devices that ignore them; the vendor.mtk key is SoC-gated.
     {
         char gate[PROP_VALUE_MAX] = {0};
         char plat[PROP_VALUE_MAX] = {0};
-        __system_property_get("persist.pixelpilot.mtkopt", gate);
+        __system_property_get("debug.pixelpilot.mtkopt", gate);
         __system_property_get("ro.board.platform", plat);
         mLowLatencyOpt   = (gate[0] == '1');                       // default OFF; opt-in: setprop ... 1
         mIsMtk           = std::string(plat).rfind("mt", 0) == 0;
         const bool isMtk = mIsMtk;
         if (mLowLatencyOpt)
         {
-            // Opt-in low-latency MediaFormat tuning. These do NOT drop frames (no buffer-count
-            // shrink — that starved the decoder); they only ask the decoder to run low-latency.
-            // Default-off so the baseline matches the known-good (2026-06-09) behaviour.
             AMediaFormat_setInt32(format, "low-latency", 1);       // PARAMETER_KEY_LOW_LATENCY
             AMediaFormat_setInt32(format, "priority", 0);          // 0 = realtime
             AMediaFormat_setInt32(format, "operating-rate", 240);  // run the HW decoder flat-out

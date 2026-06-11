@@ -106,7 +106,11 @@ void AudioDecoder::onNewAudioData(const uint8_t* data, const std::size_t data_le
         {
             return;
         }
-        // Process the decoded PCM data
-        AAudioStream_write(m_stream, pcm, decoded_samples, 0);
+        // Process the decoded PCM data. BLOCKING write (200 ms timeout) — not the old non-blocking
+        // (0) which DROPPED PCM whenever the AAudio buffer was momentarily full. The dongle delivers
+        // Opus bursty (the AP retransmits jitter arrival), so the decode thread produces in bursts;
+        // a non-blocking write throws away the burst tail → underrun gaps → choppy audio. Blocking
+        // paces this thread to the audio clock, soaking the jitter into the buffer instead.
+        AAudioStream_write(m_stream, pcm, decoded_samples, 200LL * 1000 * 1000);
     }
 }

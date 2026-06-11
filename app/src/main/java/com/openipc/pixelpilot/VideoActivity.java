@@ -321,6 +321,18 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
                 + best.getPhysicalHeight() + "@" + best.getRefreshRate() + "Hz");
         } catch (Throwable t) { Log.w(TAG, "refresh-rate request failed: " + t); }
 
+        // On-device log capture: this phone has ONE USB-C port, so the dongle and USB-adb can't be
+        // plugged at once — we can't watch logcat live during a dongle test. So the app writes its
+        // OWN logcat to a file to pull AFTER the test (reconnect adb with the dongle out). The key
+        // diagnostics (rxd-health RX loss/dup/decrypt-fail, "VideoDecoder FPS", apfpv state, devourer)
+        // are this process's own logs, captured even without READ_LOGS. Child logcat dies with the app.
+        try {
+            java.io.File lf = new java.io.File(getExternalFilesDir(null), "pixelpilot_dbg.log");
+            Runtime.getRuntime().exec(new String[]{"logcat", "-f", lf.getAbsolutePath(),
+                "-r", "16384", "-n", "4", "-v", "time"});
+            Log.i(TAG, "logcat -> " + lf.getAbsolutePath());
+        } catch (Throwable t) { Log.w(TAG, "log-to-file failed: " + t); }
+
         wifiManager = (WifiManager) getSystemService(WIFI_SERVICE);
     }
 
@@ -2266,11 +2278,21 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         }
         // APFPV station (VRX RX): persist the width for the connect Params (apfpv_bandwidth ->
         // ApfpvStation::Params.bandwidth -> StationMode connect width) and re-connect to apply it.
-        if (apfpvMode && currentBandwidth != bandwidth) {
-            getSharedPreferences("pixelpilot", MODE_PRIVATE).edit().putInt("apfpv_bandwidth", bandwidth).apply();
-            if (bandwidth > 20)
-                Toast.makeText(this, "40 MHz exceeds the DE 200 mW @ 20 MHz cap", Toast.LENGTH_LONG).show();
-            setLinkMode(linkMode);   // re-connect the station at the new width
+        // Change-check MUST use apfpv_bandwidth (the station's pref), NOT general/bandwidth above —
+        // they desync, so the old `currentBandwidth != bandwidth` test silently skipped this branch.
+        if (apfpvMode) {
+            SharedPreferences pp = getSharedPreferences("pixelpilot", MODE_PRIVATE);
+            if (pp.getInt("apfpv_bandwidth", 20) != bandwidth) {
+                pp.edit().putInt("apfpv_bandwidth", bandwidth).apply();
+                if (bandwidth > 20)
+                    Toast.makeText(this, "40 MHz exceeds the DE 200 mW @ 20 MHz cap", Toast.LENGTH_LONG).show();
+                // Re-apply WITHOUT a full app restart: setLinkMode(linkMode)/switchTo no-op on the
+                // same mode, so reconnect the current station (re-reads apfpv_bandwidth -> width).
+                String ssid = pp.getString("apfpv_ssid", "OpenIPC");
+                String pass = pp.getString("apfpv_pass", "12345678");
+                linkModeCoordinator.reconnectCurrent(ssid, pass, (m, ok, d) -> runOnUiThread(() ->
+                    Toast.makeText(this, "Bandwidth " + bandwidth + " MHz — " + d, Toast.LENGTH_SHORT).show()));
+            }
         }
         // VTX (air) side: push .wireless.width over SSH in BOTH modes, mirroring the OpenIPC GS
         // (gsmenu: `wifibroadcast cli -s .wireless.width`). One control => both ends, like the GS.

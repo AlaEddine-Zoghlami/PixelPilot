@@ -38,6 +38,29 @@ public class GLFanoutManager implements SurfaceTexture.OnFrameAvailableListener 
     private final float[]  texMatrix = new float[16];
     private HandlerThread  glThread;
     private Handler        glHandler;
+    private final java.util.concurrent.atomic.AtomicInteger pendingFrames = new java.util.concurrent.atomic.AtomicInteger(0);
+    private final Runnable renderTask = new Runnable() {
+        @Override
+        public void run() {
+            if (nativeHandle == 0 || surfaceTexture == null) return;
+            // Drain ALL pending frames, render only the freshest (FPV skip-to-latest).
+            // updateTexImage blocks until a frame is available; each call consumes one.
+            // The pendingFrames counter tells us how many onFrameAvailable callbacks
+            // fired before this task ran — drain exactly that many.
+            int toDrain = pendingFrames.get();
+            while (toDrain > 0) {
+                try {
+                    surfaceTexture.updateTexImage();
+                    pendingFrames.decrementAndGet();
+                    toDrain--;
+                } catch (Exception e) {
+                    break; // no more frames (shouldn't happen, but safe)
+                }
+            }
+            surfaceTexture.getTransformMatrix(texMatrix);
+            nativeRenderFrame(nativeHandle, texMatrix);
+        }
+    };
 
     /** Create the GL thread + EGL context bound to the display, build the SurfaceTexture the
      *  decoder will render into. Blocks until set up. @return true on success. */
@@ -119,10 +142,14 @@ public class GLFanoutManager implements SurfaceTexture.OnFrameAvailableListener 
 
     @Override
     public void onFrameAvailable(SurfaceTexture st) {   // runs on the GL thread (glHandler)
-        if (nativeHandle == 0) return;
-        st.updateTexImage();                  // pulls the decoded frame into the OES texture
-        st.getTransformMatrix(texMatrix);
-        nativeRenderFrame(nativeHandle, texMatrix);      // fan out: display + encoder
+        // Coalesce: N onFrameAvailable callbacks → 1 render of the newest frame.
+        // Each callback increments the counter; only the first posts renderTask.
+        // renderTask drains all pending frames and renders only the last → no
+        // SurfaceTexture FIFO backlog → display stays real-time regardless of
+        // source rate (120, 60, etc.).
+        if (pendingFrames.incrementAndGet() == 1) {
+            glHandler.post(renderTask);
+        }
     }
 
     public void release() {

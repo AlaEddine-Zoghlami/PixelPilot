@@ -172,8 +172,15 @@ public class ApfpvLinkManager {
     // notably openDevice() returning null and being dereferenced for its fd.
     public synchronized boolean startAdapter(UsbDevice dev) {
         if (dev == null) { Telemetry.event("apfpv_start_fail", "reason", "no_device"); return false; }
+        // Re-read channel + bandwidth from prefs on EVERY connect. These members were set only by
+        // the app-start path (setChannel/setBandwidth from VideoActivity), so every other connect
+        // route (bandwidth-change reconnect, USB hotplug, supervisor restart) reused a STALE cached
+        // width — a bandwidth change then only took effect after a full app restart.
+        android.content.SharedPreferences pp = context.getSharedPreferences("pixelpilot", Context.MODE_PRIVATE);
+        wifiChannel = pp.getInt("apfpv_channel", wifiChannel);
+        bandWidth   = pp.getInt("apfpv_bandwidth", bandWidth);
         String vidpid = String.format("%04X:%04X", dev.getVendorId(), dev.getProductId());
-        Telemetry.event("apfpv_start", "vidpid", vidpid, "ch", String.valueOf(wifiChannel));
+        Telemetry.event("apfpv_start", "vidpid", vidpid, "ch", wifiChannel + "/" + bandWidth + "MHz");
         UsbManager mgr = (UsbManager) context.getSystemService(Context.USB_SERVICE);
         if (mgr == null) {
             Telemetry.event("apfpv_start_fail", "reason", "no_usb_service");

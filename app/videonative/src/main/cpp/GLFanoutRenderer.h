@@ -51,6 +51,7 @@ class GLFanoutRenderer
         dispSurf_ = eglCreateWindowSurface(egl_, cfg_, display_, nullptr);
         if (dispSurf_ == EGL_NO_SURFACE) return fail("eglCreateWindowSurface(display)");
         if (!eglMakeCurrent(egl_, dispSurf_, dispSurf_, ctx_)) return fail("eglMakeCurrent");
+        eglSwapInterval(egl_, 0);   // disable vsync — render as fast as frames arrive, no FIFO pile-up
         if (!buildProgram()) return false;
         glGenTextures(1, &oesTex_);          // GL_TEXTURE_EXTERNAL_OES, fed by SurfaceTexture
         glBindTexture(GL_TEXTURE_EXTERNAL_OES, oesTex_);

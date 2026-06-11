@@ -22,7 +22,7 @@
  **********************************************/
 
 // Enough for pretty much any resolution/framerate we handle in OpenHD
-static constexpr const auto NALU_MAXLEN = 1024 * 1024;
+static constexpr const auto NALU_MAXLEN = 1024 * 1024 * 3;  // 3MB — 720p120 I-frame at 10Mbps
 
 typedef std::function<void(
     const std::chrono::steady_clock::time_point creation_time, const uint8_t* nalu_data, const int nalu_data_size)>
@@ -72,7 +72,7 @@ class RTPDecoder
 
     const RTP_FRAME_DATA_CALLBACK m_cb;
     // std::shared_ptr<std::array<uint8_t,NALU_MAXLEN>> m_curr_nalu{};
-    std::array<uint8_t, NALU_MAXLEN> m_curr_nalu;
+    std::vector<uint8_t>             m_curr_nalu = std::vector<uint8_t>(NALU_MAXLEN);  // heap, not stack
     size_t                           m_nalu_data_length = 0;
     bool                             m_feed_incomplete_frames;
     int                              m_total_n_fragments_for_current_fu = 0;

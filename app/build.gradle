@@ -27,6 +27,7 @@ android {
 
     buildTypes {
         release {
+            debuggable true            // allow run-as for prefs injection (dongle/Taiga setup)
             minifyEnabled = true
             shrinkResources = true
             signingConfig = signingConfigs.release

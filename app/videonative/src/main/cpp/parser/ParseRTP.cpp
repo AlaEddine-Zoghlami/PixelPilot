@@ -190,28 +190,18 @@ void RTPDecoder::parseRTPH264toNALU(const uint8_t* rtp_data, const size_t data_l
             m_total_n_fragments_for_current_fu++;
         }
     }
-    else if (nalu_header.type > 0 && nalu_header.type < 24)
-    {
-        // MLOGD<<"Got RTP H264 type [1..23] (single) payload size:"<<rtpPacket.rtpPayloadSize;
-        h264_reconstruct_and_forward_one_nalu(rtpPacket.rtpPayload, rtpPacket.rtpPayloadSize);
-    }
     else if (nalu_header.type == 24)
     {
-        // MLOGD<<"Got RTP H264 type 24 (aggregated NALUs) payload size:"<<rtpPacket.rtpPayloadSize;
+        // STAP-A aggregated NALUs
         const uint8_t* rtp_payload      = rtpPacket.rtpPayload;
         const auto     rtp_payload_size = rtpPacket.rtpPayloadSize;
         int            offset           = 0;
         while (true)
         {
-            // the size of the (n-th) nalu starts at offset+1 (1 byte STAP-A NAL HDR )
             const uint16_t* nalu_size_network = (const uint16_t*) &rtp_payload[offset + 1];
-            // replaced htons to htohs -- seemingly there was a bug in the original code, but I can't test it to make
-            // sure.
             const uint16_t nalu_size = ntohs(*nalu_size_network);
-            // While the NALU HDR of the (n-th) nalu starts at offset+3 (1 byte STAP-A NAL HDR, 2 bytes nalu size)
             const uint8_t* actual_nalu_data_p = &rtp_payload[offset + 1 + 2];
             const auto     actual_nalu_size   = nalu_size;
-            // MLOGD<<"XNALU of size:"<<(int)actual_nalu_size;
             h264_reconstruct_and_forward_one_nalu(actual_nalu_data_p, actual_nalu_size);
             offset += 2 + actual_nalu_size;
             if (!(rtp_payload_size > offset + 3))
@@ -220,9 +210,12 @@ void RTPDecoder::parseRTPH264toNALU(const uint8_t* rtp_data, const size_t data_l
             }
         }
     }
+    else if (nalu_header.type == 28)
+    { /* FU-A */ /* already handled above, but keep as explicit guard */ }
     else
     {
-        MLOGD << "Got unsupported H264 RTP packet. NALU type:" << (int) nalu_header.type;
+        // Single NALU: types 0-23, 25-27, 29-31 (e.g. x264 filler type 31)
+        h264_reconstruct_and_forward_one_nalu(rtpPacket.rtpPayload, rtpPacket.rtpPayloadSize);
     }
 }
 
@@ -381,9 +374,11 @@ void RTPDecoder::forwardNALU(const bool isH265)
 
 void RTPDecoder::append_nalu_data(const uint8_t* data, size_t data_len)
 {
-    if (m_nalu_data_length + data_len > m_curr_nalu.size())
+    if (m_nalu_data_length + data_len >= m_curr_nalu.size())
     {
-        MLOGD << "Weird - not enough space to write NALU. curr_size:" << m_nalu_data_length << " append:" << data_len;
+        MLOGD << "NALU buffer overflow — resetting. curr:" << m_nalu_data_length << " append:" << data_len << " max:" << m_curr_nalu.size();
+        m_nalu_data_length = 0;  // hard reset: prevent SIGSEGV from runaway FU-A reassembly
+        flagPacketHasGoneMissing = true;
         return;
     }
     uint8_t* p = &m_curr_nalu.at(m_nalu_data_length);

@@ -137,6 +137,44 @@ public class LinkModeCoordinator {
         if (cb != null) cb.onModeChanged(current, ok, detail);
     }
 
+    /**
+     * Re-run stop + start of the CURRENT mode. switchTo() no-ops when target == current, so this is
+     * how a connect-time-only setting (e.g. the APFPV channel width / apfpv_bandwidth) is re-applied
+     * WITHOUT a full app restart: tear the station down and bring it back up, re-reading the connect
+     * Params. Same stop/start sequence as switchTo (minus the mode change + persist).
+     */
+    public synchronized void reconnectCurrent(String ssid, String pass, ModeChangeListener cb) {
+        final Mode m = current;
+        Telemetry.event("link_reconnect", "mode", m.name());
+        switch (m) {
+            case WFB:        wfb.stopAdapters();   break;
+            case APFPV:      apfpv.stopAdapters(); break;
+            case APFPV_WIFI: if (apfpvWifi != null) apfpvWifi.stop(); break;
+        }
+        if ((m == Mode.APFPV || m == Mode.WFB) && apfpvWifi != null) apfpvWifi.stop();
+        boolean ok; String detail;
+        switch (m) {
+            case APFPV:
+                apfpv.setCredentials(ssid != null ? ssid : "OpenIPC", pass != null ? pass : "12345678");
+                ok = rebind(apfpv::startAdapter);
+                detail = ok ? "reconnected APFPV (dongle)" : "no RTL8812AU dongle found";
+                break;
+            case APFPV_WIFI:
+                if (apfpvWifi == null) { ok = false; detail = "wifi manager unavailable"; break; }
+                apfpvWifi.setCredentials(ssid != null ? ssid : "OpenIPC", pass != null ? pass : "12345678");
+                apfpvWifi.start();
+                ok = true;
+                detail = "rejoining (phone Wi-Fi)…";
+                break;
+            case WFB:
+            default:
+                ok = rebind(wfb::startAdapter);
+                detail = ok ? "reconnected WFB-ng (dongle)" : "no RTL8812AU dongle found";
+                break;
+        }
+        if (cb != null) cb.onModeChanged(m, ok, detail);
+    }
+
     /** Find the AU dongle and hand it to the target manager's startAdapter. */
     private boolean rebind(java.util.function.Function<UsbDevice, Boolean> starter) {
         if (usbManager == null) return false;
