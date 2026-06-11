@@ -95,8 +95,11 @@ void AudioDecoder::onNewAudioData(const uint8_t* data, const std::size_t data_le
     int frame_size = opus_packet_get_samples_per_frame(opus_payload, SAMPLE_RATE);
     int nb_frames  = opus_packet_get_nb_frames(opus_payload, opus_payload_size);
 
-    // Decode the frame
+    // Guard: malformed/corrupted Opus → negative values → VLA overflow → SIGSEGV
+    if (frame_size <= 0 || nb_frames <= 0) return;
     int pcm_size = frame_size * nb_frames * CHANNELS;
+    // Sanity cap: 48kHz × 48 nb_frames max × 2 ch × 2 headroom ≈ 200K
+    if (pcm_size <= 0 || pcm_size > 200000) return;
     if (pOpusDecoder && m_stream)
     {
         opus_int16 pcm[pcm_size];
@@ -106,11 +109,6 @@ void AudioDecoder::onNewAudioData(const uint8_t* data, const std::size_t data_le
         {
             return;
         }
-        // Process the decoded PCM data. BLOCKING write (200 ms timeout) — not the old non-blocking
-        // (0) which DROPPED PCM whenever the AAudio buffer was momentarily full. The dongle delivers
-        // Opus bursty (the AP retransmits jitter arrival), so the decode thread produces in bursts;
-        // a non-blocking write throws away the burst tail → underrun gaps → choppy audio. Blocking
-        // paces this thread to the audio clock, soaking the jitter into the buffer instead.
         AAudioStream_write(m_stream, pcm, decoded_samples, 200LL * 1000 * 1000);
     }
 }

@@ -123,7 +123,7 @@ class VideoDecoder
     // menu (shown only on MTK). When a decoded frame is later than this, flush to the next keyframe.
     // Default off so the baseline never drops frames; opt-in via the menu. Set from JNI via
     // setFlushThresholdMs(); plain int (benign 1-frame race on retune).
-    int                          mFlushThresholdMs = 0;
+    int                          mFlushThresholdMs = 60;  // MTK-optimized: flush stale frames at 60ms
     // Holds the AMediaCodec instance, as well as the state (configured or not configured)
     Decoder      decoder{};
     DecodingInfo decodingInfo;
@@ -144,7 +144,7 @@ class VideoDecoder
     static const constexpr auto DECODING_INFO_RECALCULATION_INTERVAL = std::chrono::milliseconds(1000);
     static constexpr const bool PRINT_DEBUG_INFO                     = true;
     static constexpr auto       TIME_BETWEEN_LOGS                    = std::chrono::seconds(5);
-    static constexpr int64_t    BUFFER_TIMEOUT_US = 17 * 1000;  // 17ms (a little bit more than 17 ms (==60 fps))
+    static constexpr int64_t    BUFFER_TIMEOUT_US = 5 * 1000;  // 5ms — 120fps budget is 8.3ms (was 17ms)
   private:
     KeyFrameFinder mKeyFrameFinder;
     bool           IS_H265 = false;

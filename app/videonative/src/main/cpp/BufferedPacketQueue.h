@@ -16,7 +16,7 @@
 // Define logging tag and maximum buffer size
 #define BUFFERED_QUEUE_LOG_TAG "BufferedPacketQueue"
 // Considering the packet rate about 100 packets per second, 10 packets should be enough
-constexpr size_t MAX_BUFFER_SIZE = 15;
+constexpr size_t MAX_BUFFER_SIZE = 120;  // ~1 frame worth at 40Mbps 120fps (~28 pkt/frame × 4)
 // Number of monotonically increasing packets
 constexpr size_t MONOTONIC_THRESHOLD = 5;
 

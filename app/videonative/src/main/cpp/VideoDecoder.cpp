@@ -195,6 +195,9 @@ void VideoDecoder::configureStartDecoder(int idx)
 
     AMediaFormat* format = AMediaFormat_new();
     AMediaFormat_setString(format, AMEDIAFORMAT_KEY_MIME, MIME.c_str());
+    // Large input buffer prevents thrashing on high-bitrate streams (40Mbps+ 120fps).
+    // Default is often too small, causing the decoder to constantly reallocate.
+    AMediaFormat_setInt32(format, "max-input-size", 4 * 1024 * 1024);  // 4MB
 
     // ---- FPV latency-priority decode config (APFPV) -----------------------------------------
     // Adapted from the PixelPilot-MTK-Optimized fork (thamtrung151). For FPV we prioritise glass-
@@ -214,15 +217,20 @@ void VideoDecoder::configureStartDecoder(int idx)
         const bool isMtk = mIsMtk;
         if (mLowLatencyOpt)
         {
-            AMediaFormat_setInt32(format, "low-latency", 1);       // PARAMETER_KEY_LOW_LATENCY
-            AMediaFormat_setInt32(format, "priority", 0);          // 0 = realtime
-            AMediaFormat_setInt32(format, "operating-rate", 240);  // run the HW decoder flat-out
+            // MTK-optimized: low-latency decode keys from thamtrung151's fork.
+            // NOTE: android._num-input/output-buffers removed — the fork's value of 3
+            // throttled the mt6991 decoder to ~60fps at 720p120 (too few buffers to
+            // sustain the decode pipeline). The other keys are benign/harmless.
+            AMediaFormat_setInt32(format, "low-latency", 1);               // PARAMETER_KEY_LOW_LATENCY
+            AMediaFormat_setInt32(format, "vendor.low-latency.enable", 1); // generic vendor low-latency
+            AMediaFormat_setInt32(format, "priority", 0);                  // 0 = realtime
+            AMediaFormat_setInt32(format, "operating-rate", 240);          // run decoder flat-out
             if (isMtk)
             {
                 AMediaFormat_setInt32(format, "vendor.mtk-videodec-low-latency", 1);
             }
             __android_log_print(ANDROID_LOG_INFO, "VideoDecoder",
-                "FPV low-latency opt-in ON (mtk=%d, flush=%dms; 0=off)", (int) isMtk, mFlushThresholdMs);
+                "FPV low-latency opt-in ON (mtk=%d, flush=%dms)", (int) isMtk, mFlushThresholdMs);
         }
     }
     // -----------------------------------------------------------------------------------------
@@ -337,13 +345,11 @@ void VideoDecoder::feedDecoder(const NALU& nalu, int idx)
         }
         else if (index == AMEDIACODEC_INFO_TRY_AGAIN_LATER)
         {
-            // just try again. But if we had no success in the last 1 second,log a warning and return.
+            // Spin-wait: at 120fps the decode pipeline needs every µs.
+            // Sleeping here (even 0.5ms) starves the decoder input at high frame rates.
             const auto elapsedTimeTryingForBuffer = std::chrono::steady_clock::now() - now;
             if (elapsedTimeTryingForBuffer > std::chrono::seconds(1))
             {
-                // Since OpenHD provides a lossy link it is really unlikely, but possible that we somehow 'break' the
-                // codec by feeding corrupt data. It will probably recover itself as soon as we feed enough valid data
-                // though;
                 MLOGE << "AMEDIACODEC_INFO_TRY_AGAIN_LATER for more than 1 second "
                       << MyTimeHelper::R(elapsedTimeTryingForBuffer) << "return.";
                 return;
@@ -399,12 +405,10 @@ void VideoDecoder::checkOutputLoop(int idx)
             //-> Message kWhatReleaseOutputBuffer -> onReleaseOutputBuffer
             //  also https://android.googlesource.com/platform/frameworks/native/+/5c1139f/libs/gui/SurfaceTexture.cpp
             if (!decoder.codec[idx]) break;
-            // Menu-controlled flush (MediaTek only, independent of the low-latency opt-in): if a
-            // decoded frame is older than mFlushThresholdMs (settings menu; DEFAULT 0 = off), flush
-            // to the next keyframe to cap latency / clear corruption. Off by default so the baseline
-            // never drops frames. The buffer index is invalidated by flush, so skip render+stats.
-            if (mIsMtk && mFlushThresholdMs > 0 && idx == 0 &&
-                (nowUS - info.presentationTimeUs) > (int64_t) mFlushThresholdMs * 1000)
+            // If a decoded frame is older than the flush threshold (UI setting, default 60ms),
+            // the decoder is backlogged — flush to the next keyframe to cap latency.
+            if (idx == 0 && mFlushThresholdMs > 0 &&
+                (nowUS - info.presentationTimeUs) > (int64_t)mFlushThresholdMs * 1000)
             {
                 AMediaCodec_flush(decoder.codec[idx]);
                 continue;

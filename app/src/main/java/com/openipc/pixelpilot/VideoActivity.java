@@ -757,7 +757,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
     /** Menu-configured MTK stale-frame flush threshold in ms (0 = off). Default off — the baseline
      *  never drops frames; enable from the menu only if you want latency-capping. */
     static int getVideoFlushMs(Context ctx) {
-        return ctx.getSharedPreferences("general", Context.MODE_PRIVATE).getInt("video_flush_ms", 0);
+        return ctx.getSharedPreferences("general", Context.MODE_PRIVATE).getInt("video_flush_ms", 60);
     }
 
     /**
@@ -767,10 +767,10 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
     private void setupVideoFlushSubMenu(PopupMenu popup) {
         SubMenu s = popup.getMenu().addSubMenu("Video flush (ms)");
         int cur = getVideoFlushMs(this);
-        s.add("Current: " + (cur == 0 ? "off" : cur + " ms")).setEnabled(false);
+        s.add("Current: " + cur + " ms").setEnabled(false);
         for (int v = 0; v <= 200; v += 20) {
             final int val = v;
-            s.add(v == 0 ? "off" : String.valueOf(v)).setOnMenuItemClickListener(i -> {
+            s.add(v == 0 ? "0 (off)" : String.valueOf(v)).setOnMenuItemClickListener(i -> {
                 getSharedPreferences("general", MODE_PRIVATE).edit().putInt("video_flush_ms", val).apply();
                 if (videoPlayer != null) videoPlayer.setVideoFlushMs(val);
                 Toast.makeText(this, "Video flush -> " + (val == 0 ? "off" : val + " ms"), Toast.LENGTH_SHORT).show();
@@ -2174,6 +2174,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         videoPlayer.stop();
         videoPlayer.stopAudio();
         wfbLinkManager.stopAdapters();
+        apfpvLinkManager.stopAdapters();   // APFPV dongle disconnect (was missing!)
 
         // Stop VPN service
         Log.w(TAG, "onPause: stopping service");
@@ -2187,9 +2188,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         MavlinkNative.nativeStop(this);
         handler.removeCallbacks(runnable);
         unregisterReceivers();
-        wfbLinkManager.stopAdapters();
-        videoPlayer.stop();
-        videoPlayer.stopAudio();
+        // All transports + video already stopped in onPause; don't double-disconnect
         super.onStop();
     }
 
@@ -2238,8 +2237,8 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         }
         videoPlayer.start();
         videoPlayer.startAudio();
-        // Apply the MTK stale-frame flush threshold from the menu pref (no-op on non-MTK natively).
-        if (isMtkDevice()) videoPlayer.setVideoFlushMs(getVideoFlushMs(this));
+        // Flush stale frames at the menu-configured threshold (default 60ms).
+        videoPlayer.setVideoFlushMs(getVideoFlushMs(this));
         if (getDvrAuto()) startAutoDvrWatcher();
 
         osdManager.restoreOSDConfig();

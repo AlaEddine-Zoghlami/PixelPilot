@@ -48,6 +48,8 @@ set(WD_HAL
         ${WD}/hal/phydm/rtl8814a/Hal8814_PhyTables.c)
 file(GLOB WD_SRC ${WD}/src/*.cpp ${WD}/src/*.c ${WD}/src/crypto/*.cpp)
 
+# ARM-CE not yet (toolchain needs float-abi=hard). Software AES with key cache.
+
 # --- the .so: driver + Station L2 + crypto + APFPV layer + wfb logic + JNI --
 add_library(${CMAKE_PROJECT_NAME} SHARED
         ${WD_HAL}
