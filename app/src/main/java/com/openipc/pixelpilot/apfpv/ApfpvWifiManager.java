@@ -21,7 +21,7 @@ import java.net.InetAddress;
  *
  * WHY THIS IS A SEPARATE MODE (vs the dongle APFPV path in ApfpvLinkManager):
  *   - There is no USB device, no monitor mode, no native 802.11 de-encapsulation.
- *   - The phone associates to greg's AP ("OpenIPC") as a normal managed station
+ *   - The phone associates to greg's AP ("Taiga") as a normal managed station
  *     and gets a DHCP lease on 192.168.0.0/24 (phone ~= 192.168.0.10, VTX .0.1).
  *   - greg's majestic streams plain UDP/RTP to 192.168.0.10:5600, which the OS
  *     hands to the EXISTING VideoPlayer UDP socket (INADDR_ANY:5600) — so the
@@ -57,8 +57,8 @@ public class ApfpvWifiManager {
     private final WifiManager wifi;
     private Listener listener;
 
-    private String ssid = "OpenIPC";
-    private String pass = "12345678";
+    private String ssid = "Taiga";
+    private String pass = "@Vdslvdsl2023";
 
     // VTX expects LQ feedback here (greg10.2 aalink.conf: PING_DEST=192.168.0.10,
     // UDP_PORT=12345). We are 192.168.0.10; the VTX (192.168.0.1) reads our RSSI.

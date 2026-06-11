@@ -102,8 +102,8 @@ public class LinkModeCoordinator {
                        : target == Mode.APFPV_WIFI ? "apfpv_wifi" : "wfb";
         context.getSharedPreferences("pixelpilot", Context.MODE_PRIVATE).edit()
             .putString("link_mode", modeStr)
-            .putString("apfpv_ssid", ssid != null ? ssid : "OpenIPC")
-            .putString("apfpv_pass", pass != null ? pass : "12345678")
+            .putString("apfpv_ssid", ssid != null ? ssid : "Taiga")
+            .putString("apfpv_pass", pass != null ? pass : "@Vdslvdsl2023")
             .apply();
 
         // 3. START the target mode.
@@ -112,8 +112,8 @@ public class LinkModeCoordinator {
         String detail;
         switch (target) {
             case APFPV:
-                apfpv.setCredentials(ssid != null ? ssid : "OpenIPC",
-                                     pass != null ? pass : "12345678");
+                apfpv.setCredentials(ssid != null ? ssid : "Taiga",
+                                     pass != null ? pass : "@Vdslvdsl2023");
                 ok = rebind(apfpv::startAdapter);
                 detail = ok ? "switched to APFPV (dongle)" : "no RTL8812AU dongle found";
                 break;
@@ -121,11 +121,11 @@ public class LinkModeCoordinator {
                 // No dongle. Associate the phone's Wi-Fi to the AP and bind
                 // sockets to it; video arrives on the existing 5600 UDP socket.
                 if (apfpvWifi == null) { ok = false; detail = "wifi manager unavailable"; break; }
-                apfpvWifi.setCredentials(ssid != null ? ssid : "OpenIPC",
-                                         pass != null ? pass : "12345678");
+                apfpvWifi.setCredentials(ssid != null ? ssid : "Taiga",
+                                         pass != null ? pass : "@Vdslvdsl2023");
                 apfpvWifi.start();
                 ok = true;  // async; real result arrives via the manager's listener
-                detail = "joining " + (ssid != null ? ssid : "OpenIPC") + " (phone Wi-Fi)\u2026";
+                detail = "joining " + (ssid != null ? ssid : "Taiga") + " (phone Wi-Fi)\u2026";
                 break;
             case WFB:
             default:
@@ -155,13 +155,13 @@ public class LinkModeCoordinator {
         boolean ok; String detail;
         switch (m) {
             case APFPV:
-                apfpv.setCredentials(ssid != null ? ssid : "OpenIPC", pass != null ? pass : "12345678");
+                apfpv.setCredentials(ssid != null ? ssid : "Taiga", pass != null ? pass : "@Vdslvdsl2023");
                 ok = rebind(apfpv::startAdapter);
                 detail = ok ? "reconnected APFPV (dongle)" : "no RTL8812AU dongle found";
                 break;
             case APFPV_WIFI:
                 if (apfpvWifi == null) { ok = false; detail = "wifi manager unavailable"; break; }
-                apfpvWifi.setCredentials(ssid != null ? ssid : "OpenIPC", pass != null ? pass : "12345678");
+                apfpvWifi.setCredentials(ssid != null ? ssid : "Taiga", pass != null ? pass : "@Vdslvdsl2023");
                 apfpvWifi.start();
                 ok = true;
                 detail = "rejoining (phone Wi-Fi)…";

@@ -389,8 +389,8 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
      * Credentials pulled from prefs.
      */
     public void setLinkMode(LinkModeCoordinator.Mode target) {
-        String ssid = getSharedPreferences("pixelpilot", MODE_PRIVATE).getString("apfpv_ssid", "OpenIPC");
-        String pass = getSharedPreferences("pixelpilot", MODE_PRIVATE).getString("apfpv_pass", "12345678");
+        String ssid = getSharedPreferences("pixelpilot", MODE_PRIVATE).getString("apfpv_ssid", "Taiga");
+        String pass = getSharedPreferences("pixelpilot", MODE_PRIVATE).getString("apfpv_pass", "@Vdslvdsl2023");
         linkModeCoordinator.switchTo(target, ssid, pass,
             (m, ok, detail) -> runOnUiThread(() -> {
                 this.linkMode = m;
@@ -1366,7 +1366,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
                         android.widget.Toast.LENGTH_SHORT).show();
                 if (chosenCh > 0) apfpvLinkManager.setChannel(chosenCh);
                 apfpvLinkManager.setCredentials(chosen,
-                    getSharedPreferences("pixelpilot", MODE_PRIVATE).getString("apfpv_pass", "12345678"));
+                    getSharedPreferences("pixelpilot", MODE_PRIVATE).getString("apfpv_pass", "@Vdslvdsl2023"));
             })
             .setNegativeButton("Close", null)
             .create();
@@ -1406,10 +1406,10 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         android.content.SharedPreferences p = getSharedPreferences("pixelpilot", MODE_PRIVATE);
         final android.widget.EditText ssid = new android.widget.EditText(this);
         ssid.setHint("SSID (default OpenIPC)");
-        ssid.setText(p.getString("apfpv_ssid", "OpenIPC"));
+        ssid.setText(p.getString("apfpv_ssid", "Taiga"));
         final android.widget.EditText pass = new android.widget.EditText(this);
         pass.setHint("Password (default 12345678)");
-        pass.setText(p.getString("apfpv_pass", "12345678"));
+        pass.setText(p.getString("apfpv_pass", "@Vdslvdsl2023"));
         android.widget.LinearLayout ll = new android.widget.LinearLayout(this);
         ll.setOrientation(android.widget.LinearLayout.VERTICAL);
         ll.addView(ssid); ll.addView(pass);
@@ -1419,8 +1419,8 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
             .setPositiveButton("Save", (d, w2) -> {
                 // No channel field: APFPV follows the AP/VTX channel via discovery.
                 getSharedPreferences("pixelpilot", MODE_PRIVATE).edit()
-                    .putString("apfpv_ssid", ssid.getText().toString().isEmpty() ? "OpenIPC" : ssid.getText().toString())
-                    .putString("apfpv_pass", pass.getText().toString().isEmpty() ? "12345678" : pass.getText().toString())
+                    .putString("apfpv_ssid", ssid.getText().toString().isEmpty() ? "Taiga" : ssid.getText().toString())
+                    .putString("apfpv_pass", pass.getText().toString().isEmpty() ? "@Vdslvdsl2023" : pass.getText().toString())
                     .apply();
                 if (apfpvLinkManager != null) apfpvLinkManager.refreshAdapters();
             })
@@ -2206,8 +2206,8 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
             case APFPV: {
                 // APFPV station on the dongle: enumerate Realtek adapters and bring
                 // the active one up with the saved credentials/channel.
-                String ssid = getSharedPreferences("pixelpilot", MODE_PRIVATE).getString("apfpv_ssid", "OpenIPC");
-                String pass = getSharedPreferences("pixelpilot", MODE_PRIVATE).getString("apfpv_pass", "12345678");
+                String ssid = getSharedPreferences("pixelpilot", MODE_PRIVATE).getString("apfpv_ssid", "Taiga");
+                String pass = getSharedPreferences("pixelpilot", MODE_PRIVATE).getString("apfpv_pass", "@Vdslvdsl2023");
                 // APFPV (dongle) RF is independent of WFB: use the APFPV channel +
                 // bandwidth prefs (default legal DE 5.2 GHz UNII-1 ch40, 20 MHz).
                 int apfpvCh = getSharedPreferences("pixelpilot", MODE_PRIVATE).getInt("apfpv_channel", 40);
@@ -2220,8 +2220,8 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
             }
             case APFPV_WIFI: {
                 // No dongle — associate the phone's Wi-Fi to the air unit.
-                String ssid = getSharedPreferences("pixelpilot", MODE_PRIVATE).getString("apfpv_ssid", "OpenIPC");
-                String pass = getSharedPreferences("pixelpilot", MODE_PRIVATE).getString("apfpv_pass", "12345678");
+                String ssid = getSharedPreferences("pixelpilot", MODE_PRIVATE).getString("apfpv_ssid", "Taiga");
+                String pass = getSharedPreferences("pixelpilot", MODE_PRIVATE).getString("apfpv_pass", "@Vdslvdsl2023");
                 if (apfpvWifiManager != null) {
                     apfpvWifiManager.setCredentials(ssid, pass);
                     apfpvWifiManager.start();
@@ -2287,8 +2287,8 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
                     Toast.makeText(this, "40 MHz exceeds the DE 200 mW @ 20 MHz cap", Toast.LENGTH_LONG).show();
                 // Re-apply WITHOUT a full app restart: setLinkMode(linkMode)/switchTo no-op on the
                 // same mode, so reconnect the current station (re-reads apfpv_bandwidth -> width).
-                String ssid = pp.getString("apfpv_ssid", "OpenIPC");
-                String pass = pp.getString("apfpv_pass", "12345678");
+                String ssid = pp.getString("apfpv_ssid", "Taiga");
+                String pass = pp.getString("apfpv_pass", "@Vdslvdsl2023");
                 linkModeCoordinator.reconnectCurrent(ssid, pass, (m, ok, d) -> runOnUiThread(() ->
                     Toast.makeText(this, "Bandwidth " + bandwidth + " MHz — " + d, Toast.LENGTH_SHORT).show()));
             }
