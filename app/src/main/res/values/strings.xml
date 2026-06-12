@@ -49,5 +49,6 @@
     <string-array name="bandwidths">
         <item>20</item>
         <item>40</item>
+        <item>80</item>
     </string-array>
 </resources>
