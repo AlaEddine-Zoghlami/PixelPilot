@@ -1782,16 +1782,26 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
     // VPN SERVICE
     // ----------------------------------------------------------------------------
     private void startVpnService() {
-        int VPN_REQUEST_CODE = 100;
+        // VPN is only needed for WFB mode (raw WiFi frames). In APFPV dongle mode,
+        // the dongle handles the link — the VPN just wastes a service start and
+        // crashes on Android 14+ (BackgroundServiceStartNotAllowedException) if
+        // the app is launched while the device is asleep/locked.
+        String mode = getSharedPreferences("pixelpilot", MODE_PRIVATE)
+                .getString("link_mode", "apfpv");
+        if ("apfpv".equals(mode) || "apfpv_wifi".equals(mode)) return;
 
+        int VPN_REQUEST_CODE = 100;
         Intent intent = VpnService.prepare(this);
         if (intent != null) {
             startActivityForResult(intent, VPN_REQUEST_CODE);
         } else {
             Intent serviceIntent = new Intent(this, WfbNgVpnService.class);
-            startService(serviceIntent);
+            try {
+                startService(serviceIntent);
+            } catch (IllegalStateException e) {
+                android.util.Log.w("VideoActivity", "Cannot start VPN (background): " + e);
+            }
         }
-
     }
 
     private Uri openDvrFile() { return openDvrFile(""); }
