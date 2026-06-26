@@ -40,8 +40,8 @@ public class ApfpvLinkManager {
 
     private int     wifiChannel = 40;        // default to legal 5.2 GHz UNII-1
     private int     bandWidth   = 20;        // 20 MHz = full 200 mW under PSD cap
-    private String  ssid        = "Taiga";
-    private String  passphrase  = "@Vdslvdsl2023";
+    private String  ssid        = "OpenIPC";
+    private String  passphrase  = "12345678";
     private String  staticIp    = "";        // "a.b.c.d" = bind that fixed IP (skip DHCP); "" = DHCP
 
     private final Map<String, UsbDevice> activeAdapters = new HashMap<>();

@@ -19,8 +19,8 @@ package com.openipc.pixelpilot.apfpv;
 public class ApfpvSettings {
 
     // ---- GS APFPV connection (set gs apfpv ssid/password; multi-card wlx) ---
-    public String  ssid       = "Taiga";
-    public String  password   = "@Vdslvdsl2023";
+    public String  ssid       = "OpenIPC";
+    public String  password   = "12345678";
     public int     channel    = 44;       // test AP channel (set per-AP)
     public int     bandwidth  = 20;       // 20 MHz = full 200 mW under PSD cap
 
