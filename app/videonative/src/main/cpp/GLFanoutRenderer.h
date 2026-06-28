@@ -76,6 +76,18 @@ class GLFanoutRenderer
 
     void setRecordOsd(bool on) { recordOsd_.store(on); }
 
+    // VR: a second display window (the other eye). The single decoded frame is rendered to BOTH
+    // eye surfaces in renderFrame -> one decode, two displays (no second HEVC decoder needed).
+    // Call on the GL-context thread. Pass nullptr to detach the second eye.
+    void setDisplayWindow2(ANativeWindow* win2)
+    {
+        if (dispSurf2_ != EGL_NO_SURFACE) { eglDestroySurface(egl_, dispSurf2_); dispSurf2_ = EGL_NO_SURFACE; }
+        display2_ = win2;
+        if (win2) dispSurf2_ = eglCreateWindowSurface(egl_, cfg_, win2, nullptr);
+        __android_log_print(ANDROID_LOG_DEBUG, "GLFanoutDbg", "setDisplayWindow2 win=%p surf=%p err=0x%x",
+                            (void*) win2, (void*) dispSurf2_, win2 ? eglGetError() : 0);
+    }
+
     // DVR: create the surface-input encoder, point the fan-out's encoder pass at its input
     // surface, and route its NALUs to cb (the mp4 writer). The GL pass then composites the
     // video (+ OSD when recordOsd) into the recording. Call on the GL thread (eglCreateWindowSurface).
@@ -131,6 +143,16 @@ class GLFanoutRenderer
         eglQuerySurface(egl_, dispSurf_, EGL_HEIGHT, &vpH_);
         drawOes(texMatrix, /*withOsd=*/false);
         eglSwapBuffers(egl_, dispSurf_);
+        // VR: render the SAME decoded frame to the second eye's display surface. One decode,
+        // two displays — avoids a second HEVC decoder (which on MTK is SW-only and can't sustain
+        // two 720p120 streams, and whose HW path renders black even via GL).
+        if (dispSurf2_ != EGL_NO_SURFACE) {
+            eglMakeCurrent(egl_, dispSurf2_, dispSurf2_, ctx_);
+            eglQuerySurface(egl_, dispSurf2_, EGL_WIDTH,  &vpW_);
+            eglQuerySurface(egl_, dispSurf2_, EGL_HEIGHT, &vpH_);
+            drawOes(texMatrix, /*withOsd=*/false);
+            eglSwapBuffers(egl_, dispSurf2_);
+        }
         encodePass(encSurf_,    recordOsd_.load(), texMatrix);  // primary stream: Raw (clean) OR OSD
         encodePass(encSurfRaw_, false,             texMatrix);  // secondary stream: Raw+OSD's clean file
     }
@@ -158,11 +180,12 @@ class GLFanoutRenderer
             eglMakeCurrent(egl_, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
             if (encSurf_  != EGL_NO_SURFACE) eglDestroySurface(egl_, encSurf_);
             if (encSurfRaw_ != EGL_NO_SURFACE) eglDestroySurface(egl_, encSurfRaw_);
-            if (dispSurf_ != EGL_NO_SURFACE) eglDestroySurface(egl_, dispSurf_);
+            if (dispSurf_  != EGL_NO_SURFACE) eglDestroySurface(egl_, dispSurf_);
+            if (dispSurf2_ != EGL_NO_SURFACE) eglDestroySurface(egl_, dispSurf2_);
             if (ctx_      != EGL_NO_CONTEXT) eglDestroyContext(egl_, ctx_);
             eglTerminate(egl_);
         }
-        egl_ = EGL_NO_DISPLAY; ctx_ = EGL_NO_CONTEXT; dispSurf_ = encSurf_ = EGL_NO_SURFACE;
+        egl_ = EGL_NO_DISPLAY; ctx_ = EGL_NO_CONTEXT; dispSurf_ = dispSurf2_ = encSurf_ = EGL_NO_SURFACE;
     }
 
   private:
@@ -271,12 +294,14 @@ class GLFanoutRenderer
         }
     }
 
-    ANativeWindow* display_ = nullptr;
+    ANativeWindow* display_  = nullptr;
+    ANativeWindow* display2_ = nullptr;   // VR: second eye window
     ANativeWindow* enc_     = nullptr;
     EGLDisplay egl_      = EGL_NO_DISPLAY;
     EGLContext ctx_      = EGL_NO_CONTEXT;
     EGLConfig  cfg_      = nullptr;
-    EGLSurface dispSurf_ = EGL_NO_SURFACE;
+    EGLSurface dispSurf_  = EGL_NO_SURFACE;
+    EGLSurface dispSurf2_ = EGL_NO_SURFACE;   // VR: second eye EGL surface
     EGLSurface encSurf_    = EGL_NO_SURFACE;
     EGLSurface encSurfRaw_ = EGL_NO_SURFACE;
     GLuint     prog_ = 0, osdProg_ = 0, oesTex_ = 0, osdTex_ = 0, vbo_ = 0;

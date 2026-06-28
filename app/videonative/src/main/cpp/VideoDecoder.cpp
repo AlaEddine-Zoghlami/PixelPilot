@@ -103,8 +103,11 @@ void VideoDecoder::interpretNALU(const NALU& nalu)
     }
     if (decoder.configured[0] || decoder.configured[1])
     {
-        feedDecoder(nalu, 0);
-        feedDecoder(nalu, 1);
+        // Feed ONLY decoders that are actually configured. In VR we now run a single decode
+        // (idx 0) and fan it to both eyes via GL, so idx 1 has no codec -> feeding it would
+        // deref a null AMediaCodec. (When both are configured, e.g. legacy dual-decode, both feed.)
+        if (decoder.configured[0]) feedDecoder(nalu, 0);
+        if (decoder.configured[1]) feedDecoder(nalu, 1);
         decodingInfo.nNALUSFeeded++;
         // manually feeding AUDs doesn't seem to change anything for high latency streams
         // Only for the x264 sw encoded example stream it might improve latency slightly

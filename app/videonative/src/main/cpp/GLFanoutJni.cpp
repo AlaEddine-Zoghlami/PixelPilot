@@ -43,6 +43,14 @@ Java_com_openipc_videonative_GLFanoutManager_nativeSetEncoderSurface(JNIEnv* env
     R(h)->setEncoderWindow(w);
 }
 
+// VR second eye: render the single decoded frame to a 2nd display surface too. Pass null to detach.
+JNIEXPORT void JNICALL
+Java_com_openipc_videonative_GLFanoutManager_nativeSetDisplay2(JNIEnv* env, jobject, jlong h, jobject surface2) {
+    if (!h) return;
+    ANativeWindow* w = surface2 ? ANativeWindow_fromSurface(env, surface2) : nullptr;
+    R(h)->setDisplayWindow2(w);
+}
+
 JNIEXPORT void JNICALL
 Java_com_openipc_videonative_GLFanoutManager_nativeSetRecordOsd(JNIEnv*, jobject, jlong h, jboolean on) {
     if (h) R(h)->setRecordOsd(on == JNI_TRUE);

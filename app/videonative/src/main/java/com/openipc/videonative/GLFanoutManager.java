@@ -103,6 +103,14 @@ public class GLFanoutManager implements SurfaceTexture.OnFrameAvailableListener 
         });
     }
 
+    /** VR: render the single decode to a SECOND display surface (the other eye) too — one decode,
+     *  two eyes. Pass null to detach. Runs on the GL thread (EGL surface create/destroy). */
+    public void setSecondDisplay(final Surface displaySurface2) {
+        if (glHandler != null) glHandler.post(() -> {
+            if (nativeHandle != 0) nativeSetDisplay2(nativeHandle, displaySurface2);
+        });
+    }
+
     public void setRecordOsd(final boolean on) {
         if (glHandler != null) glHandler.post(() -> {
             if (nativeHandle != 0) nativeSetRecordOsd(nativeHandle, on);
@@ -177,6 +185,7 @@ public class GLFanoutManager implements SurfaceTexture.OnFrameAvailableListener 
     private native long nativeInit(Surface displaySurface);
     private native int  nativeOesTexture(long handle);
     private native void nativeSetEncoderSurface(long handle, Surface encoderSurface);
+    private native void nativeSetDisplay2(long handle, Surface displaySurface2);
     private native void nativeSetRecordOsd(long handle, boolean on);
     private native void nativeUpdateOsd(long handle, Bitmap osd);
     private native void nativeRenderFrame(long handle, float[] texMatrix);

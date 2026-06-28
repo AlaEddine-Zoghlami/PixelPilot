@@ -430,8 +430,12 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
      */
     private void setupVRVideoPlayers() {
         binding.mainVideo.setVisibility(View.GONE);
+        // ONE decode drives BOTH eyes: configure1(0) is the single HEVC decoder + the left-eye
+        // fan-out display; the right eye is just a 2nd display surface on that same fan-out.
+        // Avoids a second decoder (MTK can't sustain two SW HEVC at 720p120, and its HW HEVC
+        // renders black even via GL) — fixes the VR eye freeze/black.
         binding.surfaceViewLeft.getHolder().addCallback(videoPlayer.configure1(0));
-        binding.surfaceViewRight.getHolder().addCallback(videoPlayer.configure1(1));
+        binding.surfaceViewRight.getHolder().addCallback(videoPlayer.configureVrSecondEye());
     }
 
     /**

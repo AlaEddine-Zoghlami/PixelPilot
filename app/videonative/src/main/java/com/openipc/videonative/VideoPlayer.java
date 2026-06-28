@@ -181,6 +181,8 @@ public class VideoPlayer implements IVideoParamsChanged {
     // mismatch (it stalled with the fan-out OFF too), not the fan-out. Kept behind a kill-switch.
     private static final boolean GL_FANOUT_ENABLED = true;
     private GLFanoutManager glFanout;
+    // VR right-eye surface that arrived before the (left-eye) fan-out existed; applied on create.
+    private Surface pendingSecondEye;
 
     public SurfaceHolder.Callback configure1(int index) {
         return new SurfaceHolder.Callback() {
@@ -192,6 +194,11 @@ public class VideoPlayer implements IVideoParamsChanged {
                     GLFanoutManager fanout = new GLFanoutManager();
                     if (fanout.init(holder.getSurface())) {
                         glFanout = fanout;
+                        // VR: if the right eye attached first, wire it into this fan-out now.
+                        if (pendingSecondEye != null) {
+                            fanout.setSecondDisplay(pendingSecondEye);
+                            pendingSecondEye = null;
+                        }
                         addAndStartDecoderReceiver(fanout.inputSurface(), index);
                         return;
                     }
@@ -209,6 +216,35 @@ public class VideoPlayer implements IVideoParamsChanged {
                 Log.d(TAG, "surfaceDestroyed idx: " + index);
                 stopAndRemoveReceiverDecoder(index);
                 if (glFanout != null) { glFanout.release(); glFanout = null; }
+            }
+        };
+    }
+
+    /**
+     * VR right eye: hand the right SurfaceView to the SAME fan-out as a second display surface —
+     * one decode (configure1(0)) drives BOTH eyes via GL. No second decoder (MTK can't sustain two
+     * SW HEVC at 720p120, and its HW HEVC renders black even via GL). If the fan-out isn't up yet
+     * (right surface created before left), stash it and apply it when configure1 builds the fan-out.
+     */
+    public SurfaceHolder.Callback configureVrSecondEye() {
+        return new SurfaceHolder.Callback() {
+            @Override
+            public void surfaceCreated(SurfaceHolder holder) {
+                if (glFanout != null) {
+                    glFanout.setSecondDisplay(holder.getSurface());
+                } else {
+                    pendingSecondEye = holder.getSurface();
+                }
+            }
+
+            @Override
+            public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
+            }
+
+            @Override
+            public void surfaceDestroyed(SurfaceHolder holder) {
+                pendingSecondEye = null;
+                if (glFanout != null) glFanout.setSecondDisplay(null);
             }
         };
     }
