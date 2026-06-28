@@ -47,15 +47,21 @@ public class GLFanoutManager implements SurfaceTexture.OnFrameAvailableListener 
             // updateTexImage blocks until a frame is available; each call consumes one.
             // The pendingFrames counter tells us how many onFrameAvailable callbacks
             // fired before this task ran — drain exactly that many.
-            int toDrain = pendingFrames.get();
+            // Claim ALL pending frames AND reset the counter to 0 atomically. Critical:
+            // onFrameAvailable only re-posts renderTask on the 0->1 edge, so the counter
+            // MUST return to 0 every pass or the gate never re-arms. The old code
+            // decremented per successful updateTexImage and `break` on exception left the
+            // counter stuck >0 forever -> renderTask never posted again -> SurfaceTexture
+            // buffer queue fills -> decoder blocks -> that eye freezes permanently (the
+            // "worked then froze" VR symptom). getAndSet(0) re-arms the gate regardless.
+            int toDrain = pendingFrames.getAndSet(0);
             while (toDrain > 0) {
                 try {
                     surfaceTexture.updateTexImage();
-                    pendingFrames.decrementAndGet();
-                    toDrain--;
                 } catch (Exception e) {
-                    break; // no more frames (shouldn't happen, but safe)
+                    break; // counter already reset; the next frame re-posts renderTask
                 }
+                toDrain--;
             }
             surfaceTexture.getTransformMatrix(texMatrix);
             nativeRenderFrame(nativeHandle, texMatrix);
