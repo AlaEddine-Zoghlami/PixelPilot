@@ -267,9 +267,13 @@ public class ApfpvLinkManager {
                 }
             }
         } catch (Exception ignored) {}
-        // HARDCODE FALLBACK: if WifiManager couldn't resolve (no location perm), use the
-        // known Taiga BSSID + channel so the dongle arms straight to it (skip flaky sweep).
-        if (bssid.isEmpty()) { bssid = "50:e6:36:7d:54:f3"; resolvedCh = 52; }
+        // If WifiManager couldn't resolve the AP (no fresh OpenIPC scan result, no location
+        // permission, or the phone isn't associated to it), DON'T hand the dongle a guessed
+        // BSSID/channel. This used to hardcode an old "Taiga" test AP (50:e6:36:..:f3 on ch52),
+        // which armed the dongle off-channel against the home router -> TXFAIL_NoAuth. Leave
+        // bssid empty + keep the configured channel so the native runs its own scan/sweep and
+        // finds the real OpenIPC AP on its actual channel.
+        if (bssid.isEmpty()) { resolvedCh = wifiChannel; }
         wifiChannel = resolvedCh;
         Telemetry.event("apfpv_resolve", "bssid", bssid.isEmpty() ? "none" : bssid, "ch", String.valueOf(resolvedCh));
         final long handle = staLink.handle();
