@@ -1219,6 +1219,45 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
                         apfpvLinkManager.selectAdapter(a.name); return true; });
         }
 
+        // APFPV Channel/Width as RANGES, mirroring the air WebUI (aalinkFPV-channel.cgi).
+        // The AP operates on channel RANGES (primary + secondary/center): "36_40" is a
+        // 40 MHz pair with PRIMARY ch36, "36_48" an 80 MHz quad with primary ch36. A
+        // userspace station can't follow a runtime CSA, so it must arm to the AP's EXACT
+        // primary. Picking a bare "40" mismatches (the AP's 40 MHz range is 36_40, primary
+        // 36) -> connects then drops. So each entry sets apfpv_channel to the range's
+        // PRIMARY (lowest 20 MHz channel) + the width; legalApfpvChannel(primary,bw) then
+        // reproduces the AP's exact secondary-offset/center. Labels match the WebUI 1:1 so
+        // you pick the SAME string on both ends. Legal DE 5.2 GHz UNII-1 (5170-5250) only.
+        SubMenu chMenu = popup.getMenu().addSubMenu("APFPV Channel/Width");
+        int curCh = getSharedPreferences("pixelpilot", MODE_PRIVATE).getInt("apfpv_channel", 40);
+        int curBw = getSharedPreferences("pixelpilot", MODE_PRIVATE).getInt("apfpv_bandwidth", 20);
+        chMenu.add("Current: ch" + curCh + " · " + curBw + " MHz").setEnabled(false);
+        final int[][] apfpvRanges = {
+            {36, 20}, {40, 20}, {44, 20}, {48, 20},   // 20 MHz singles
+            {36, 40}, {44, 40},                        // 40 MHz pairs: 36_40, 44_48 (primary = lower)
+            {36, 80},                                  // 80 MHz quad: 36_48 (primary 36)
+        };
+        final String[] apfpvRangeLabels = {
+            "36 (20 MHz)", "40 (20 MHz)", "44 (20 MHz)", "48 (20 MHz)",
+            "36_40 (40 MHz)", "44_48 (40 MHz)", "36_48 (80 MHz)",
+        };
+        for (int r = 0; r < apfpvRanges.length; r++) {
+            final int primary = apfpvRanges[r][0], bw = apfpvRanges[r][1];
+            chMenu.add(apfpvRangeLabels[r]).setOnMenuItemClickListener(i -> {
+                getSharedPreferences("pixelpilot", MODE_PRIVATE).edit()
+                    .putInt("apfpv_channel", primary).putInt("apfpv_bandwidth", bw).apply();
+                if (apfpvLinkManager != null) {
+                    apfpvLinkManager.setChannel(primary);
+                    apfpvLinkManager.setBandwidth(bw);
+                    apfpvLinkManager.refreshAdapters();   // reconnect to apply
+                }
+                Toast.makeText(this, String.format(java.util.Locale.US,
+                    "APFPV → primary ch%d · %d MHz. Set the SAME range on the air WebUI. Reconnecting…",
+                    primary, bw), Toast.LENGTH_LONG).show();
+                return true;
+            });
+        }
+
         // aalink keys — each its OWN top-level submenu, exactly like Channel/Bandwidth
         pickString(popup, "aalink MCS source", cfg.mcsSource,
             new String[]{"lowest","highest","both","uplink","downlink"},
