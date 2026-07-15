@@ -652,14 +652,20 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         // VR submenu
         setupVRSubMenu(popup);
 
-        // Channel submenu
-        setupChannelSubMenu(popup);
-
-        // Bandwidth submenu
-        setupBandwidthSubMenu(popup);
+        // Channel + Bandwidth submenus REMOVED: the APFPV station now resolves band/channel
+        // (via scan) and bandwidth (from the AP's HT/VHT operation IEs) AUTOMATICALLY at connect
+        // time — matching what the AP actually provides — so manual channel/width selection is
+        // obsolete and only served to mis-set a fixed 20MHz that capped throughput.
 
         // OSD submenu
         setupOSDSubMenu(popup);
+
+        // Overshoot Fix reversal (colortrans un-wash) — undoes the VTX _colortrans.bin washout.
+        setupColortransSubMenu(popup);
+
+        // Route VTX (192.168.0.1) SSH/HTTP through the dongle so menu settings apply on the
+        // dongle path (not just phone-Wi-Fi). No-op unless the dongle link is up.
+        setupVtxRouteSubMenu(popup);
 
         // Video flush (ms) — MediaTek only (the stale-frame flush is on the MTK decode path).
         if (isMtkDevice()) {
