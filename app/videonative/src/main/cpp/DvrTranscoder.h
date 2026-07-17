@@ -52,13 +52,18 @@ class DvrTranscoder
     {
         if (running.load()) return true;
         if (width <= 0 || height <= 0) return false;
+        // A failed start (e.g. MTK codec2 can't spin up a 2nd HEVC decoder + H.264 encoder at
+        // 120fps) must NOT be retried on every NALU: the rapid create→fail→cleanup churn corrupts
+        // the codec2 buffer pool (Invalid-free / decStrong-too-many aborts). Latch off after the
+        // first failure until stop() clears it.
+        if (startFailed.load()) return false;
         onEncoded = std::move(cb);
         outIsH265 = h265Out;
 
         // ---- Encoder: surface-input, produces Annex-B NALUs -------------------
         const char* outMime = h265Out ? "video/hevc" : "video/avc";
         encoder             = AMediaCodec_createEncoderByType(outMime);
-        if (!encoder) return false;
+        if (!encoder) { startFailed.store(true); return false; }
         AMediaFormat* ef = AMediaFormat_new();
         AMediaFormat_setString(ef, AMEDIAFORMAT_KEY_MIME, outMime);
         AMediaFormat_setInt32(ef, AMEDIAFORMAT_KEY_WIDTH, width);
@@ -70,27 +75,42 @@ class DvrTranscoder
         AMediaFormat_setInt32(ef, AMEDIAFORMAT_KEY_I_FRAME_INTERVAL, 1);
         if (AMediaCodec_configure(encoder, ef, nullptr, nullptr,
                                   AMEDIACODEC_CONFIGURE_FLAG_ENCODE) != AMEDIA_OK)
-        { AMediaFormat_delete(ef); cleanup(); return false; }
+        { AMediaFormat_delete(ef); startFailed.store(true); cleanup(); return false; }
         AMediaFormat_delete(ef);
-        if (AMediaCodec_createInputSurface(encoder, &encInputSurface) != AMEDIA_OK) { cleanup(); return false; }
-        if (AMediaCodec_start(encoder) != AMEDIA_OK) { cleanup(); return false; }
+        if (AMediaCodec_createInputSurface(encoder, &encInputSurface) != AMEDIA_OK) { startFailed.store(true); cleanup(); return false; }
+        if (AMediaCodec_start(encoder) != AMEDIA_OK) { startFailed.store(true); cleanup(); return false; }
 
         // ---- Decoder: renders the wire NALUs into the encoder's input surface --
         const char* inMime = inputIsH265 ? "video/hevc" : "video/avc";
         decoder            = AMediaCodec_createDecoderByType(inMime);
-        if (!decoder) { cleanup(); return false; }
+        if (!decoder) { startFailed.store(true); cleanup(); return false; }
         AMediaFormat* df = AMediaFormat_new();
         AMediaFormat_setString(df, AMEDIAFORMAT_KEY_MIME, inMime);
         AMediaFormat_setInt32(df, AMEDIAFORMAT_KEY_WIDTH, width);
         AMediaFormat_setInt32(df, AMEDIAFORMAT_KEY_HEIGHT, height);
         if (csd && csdLen) AMediaFormat_setBuffer(df, "csd-0", (void*) csd, csdLen);
         if (AMediaCodec_configure(decoder, df, encInputSurface, nullptr, 0) != AMEDIA_OK)
-        { AMediaFormat_delete(df); cleanup(); return false; }
+        { AMediaFormat_delete(df); startFailed.store(true); cleanup(); return false; }
         AMediaFormat_delete(df);
-        if (AMediaCodec_start(decoder) != AMEDIA_OK) { cleanup(); return false; }
+        if (AMediaCodec_start(decoder) != AMEDIA_OK) { startFailed.store(true); cleanup(); return false; }
 
+        // std::thread construction throws std::system_error if the OS can't spawn a thread
+        // (resource pressure during a reconnect/error storm). Uncaught, that aborts the whole
+        // app via std::terminate — so contain it: fail the DVR start, leave live decode intact.
         running.store(true);
-        drainThread = std::thread(&DvrTranscoder::drainLoop, this);
+        try
+        {
+            drainThread = std::thread(&DvrTranscoder::drainLoop, this);
+        }
+        catch (const std::exception& e)
+        {
+            __android_log_print(ANDROID_LOG_WARN, "DvrTranscoder",
+                                "failed to start drain thread (%s) - DVR disabled", e.what());
+            running.store(false);
+            startFailed.store(true);
+            cleanup();
+            return false;
+        }
         return true;
     }
 
@@ -110,6 +130,7 @@ class DvrTranscoder
 
     void stop()
     {
+        startFailed.store(false);   // fresh recording session may retry codec setup
         if (!running.exchange(false)) { cleanup(); return; }
         if (encoder) AMediaCodec_signalEndOfInputStream(encoder);
         if (drainThread.joinable()) drainThread.join();
@@ -161,6 +182,7 @@ class DvrTranscoder
     AMediaCodec*      encoder         = nullptr;
     ANativeWindow*    encInputSurface = nullptr;
     std::atomic<bool> running{false};
+    std::atomic<bool> startFailed{false};   // latched after a failed start; cleared by stop()
     std::thread       drainThread;
     OnEncodedNalu     onEncoded;
     bool              outIsH265 = false;

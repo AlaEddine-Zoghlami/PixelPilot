@@ -61,6 +61,12 @@ public class VideoPlayer implements IVideoParamsChanged {
     // MTK stale-frame flush threshold (ms, 0=off). Settings menu (MTK devices only) -> decoder.
     public static native void nativeSetVideoFlushMs(long nativeInstance, int ms);
 
+    // OpenIPC "Overshoot Fix" colortrans reversal (un-wash the pre-distorted video).
+    public static native void nativeSetColortrans(long nativeInstance, boolean enable, float gain, float offset);
+    public void setColortrans(boolean enable, float gain, float offset) {
+        nativeSetColortrans(nativeVideoPlayer, enable, gain, offset);
+    }
+
     /** Reliable current video params straight from the decoder (the IVideoParamsChanged Java
      *  callbacks don't reach VideoActivity, so the DVR sources W/H/fps/codec from here). */
     public int     getVideoWidth()  { return nativeGetVideoWidth(nativeVideoPlayer); }

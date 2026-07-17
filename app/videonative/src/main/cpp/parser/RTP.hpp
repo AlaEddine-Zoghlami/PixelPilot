@@ -209,6 +209,12 @@ class RTPPacket
         {
             rtpPayloadSize = 0;
         }
+        // A runt packet (data_length < 12) would make the subtraction above underflow to a huge size_t.
+        // Callers guard the typed H264/H265 entry points, but keep the base class self-consistent too.
+        if (data_length < sizeof(rtp_header_t))
+        {
+            rtpPayloadSize = 0;
+        }
     }
 
     // const reference to the rtp header
@@ -228,7 +234,7 @@ class RTPPacketH264 : public RTPPacket
     // reference to the NALU header if packet type is H264
     const nalu_header_t& getNALUHeaderH264() const
     {
-        assert(rtpPayloadSize >= sizeof(nalu_header_t));
+        // no assert() — aborts the app on malformed network input; callers guard sizes/types.
         return *(nalu_header_t*) rtpPayload;
     }
 
@@ -236,7 +242,6 @@ class RTPPacketH264 : public RTPPacket
     // WARNING: Call this function only for fu packets !
     const fu_header_t& getFuHeader() const
     {
-        assert(getNALUHeaderH264().type == 28);
         return *(fu_header_t*) &rtpPayload[sizeof(nalu_header_t)];
     }
 
@@ -253,7 +258,7 @@ class RTPPacketH265 : public RTPPacket
     //  reference to the NALU header if packet type is H265
     const nal_unit_header_h265_t& getNALUHeaderH265() const
     {
-        assert(rtpPayloadSize >= sizeof(nal_unit_header_h265_t));
+        // no assert() — aborts the app on malformed network input; callers guard sizes/types.
         return *(nal_unit_header_h265_t*) rtpPayload;
     }
 
@@ -261,7 +266,6 @@ class RTPPacketH265 : public RTPPacket
     // WARNING: Call this function only for fu packets !
     const fu_header_h265_t& getFuHeader() const
     {
-        assert(getNALUHeaderH265().type == 49);
         return *(fu_header_h265_t*) &rtpPayload[sizeof(nal_unit_header_h265_t)];
     }
 

@@ -73,8 +73,36 @@ public class ApfpvStaLink {
     /** Native ApfpvStation handle for the manager to pass to native calls. */
     public long handle() { return nativeStaLink; }
 
+    /** Most-recently-created link, so the ApfpvVpnService (a separate Service, no handle) can
+     *  reach the native IP bridge statically. */
+    private static volatile ApfpvStaLink active;
+
     public ApfpvStaLink(Context context) {
         nativeStaLink = nativeStaInitialize(context);
+        active = this;
+    }
+
+    // ---- General-IP bridge for the ApfpvVpnService TUN (SSH-over-dongle) -----
+    // Uplink: TUN packet -> sendIpPacket over the dongle. Downlink armed via setIpBridge(true):
+    // native routes decrypted general-IP to UDP 127.0.0.1:5601 for the VpnService to write to TUN.
+    public static native void nativeStaSendIp(long inst, byte[] ip, int len);
+    public static native void nativeStaSetIpBridge(long inst, boolean on);
+    /** Uplink from the VpnService TUN reader (static: the Service has no link handle). */
+    public static void sendIp(byte[] ip, int len) {
+        ApfpvStaLink a = active;
+        if (a != null && a.nativeStaLink != 0L) nativeStaSendIp(a.nativeStaLink, ip, len);
+    }
+    /** Arm/disarm the downlink bridge (called when the VpnService starts/stops). */
+    public static void setIpBridge(boolean on) {
+        ApfpvStaLink a = active;
+        if (a != null && a.nativeStaLink != 0L) nativeStaSetIpBridge(a.nativeStaLink, on);
+    }
+    /** The dongle's actual DHCP lease IP (host byte order), or 0 if none. The VpnService TUN must
+     *  use this as its address so the VTX can ARP/route replies back (SSH/LQ round-trip). */
+    public static native int nativeStaLeaseIp(long inst);
+    public static int leaseIp() {
+        ApfpvStaLink a = active;
+        return (a != null && a.nativeStaLink != 0L) ? nativeStaLeaseIp(a.nativeStaLink) : 0;
     }
 
     // ---- NEW native surface (cf. WfbNgLink.nativeRun) -----------------------
@@ -100,6 +128,15 @@ public class ApfpvStaLink {
         nativeStaStartBeaconCal(nativeStaLink, fd, ssid, channel, txIndex);
     }
     public void stopBeaconCal() { nativeStaStopBeaconCal(nativeStaLink); }
+
+    // Dongle-as-AP (SoftAP) — WIP test path. Beacons the SSID + runs the WPA2 authenticator; with
+    // DEVOURER_AP_HWACK the Jaguar1 HW software-beacon (ENSWBCN) + per-STA ACK. pass "" = open AP.
+    public static native void nativeStaStartAp(long inst, int fd, String ssid, int channel, String pass);
+    public static native void nativeStaStopAp(long inst);
+    public void startAp(int fd, String ssid, int channel, String pass) {
+        nativeStaStartAp(nativeStaLink, fd, ssid, channel, pass == null ? "" : pass);
+    }
+    public void stopAp() { nativeStaStopAp(nativeStaLink); }
 
     // Poll/observe the lifecycle (delivered via registered callback below).
     public static native int  nativeStaGetState(long inst);   // -> StaState ordinal

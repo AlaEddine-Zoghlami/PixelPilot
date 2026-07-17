@@ -130,6 +130,11 @@ class VideoDecoder
     // The input pipe is closed until we set a valid surface
     bool                           inputPipeClosed = true;
     std::mutex                     mMutexInputPipe;
+    // Serializes AMediaCodec_flush (checkOutputLoop / output thread) against
+    // AMediaCodec_dequeueInputBuffer (feedDecoder / parse thread). Concurrent flush + input-dequeue
+    // trips the framework CHECK "MediaCodec.cpp:4310 findSize(index)" and abort()s — seen under
+    // heavy loss (torn NALUs → decoder errors → flush fires while feed is dequeuing). One per idx.
+    std::mutex                     mCodecFlushMtx[2];
     DECODER_RATIO_CHANGED          onDecoderRatioChangedCallback = nullptr;
     DECODING_INFO_CHANGED_CALLBACK onDecodingInfoChangedCallback = nullptr;
     // So we can temporarily attach the output thread to the vm and make ndk calls

@@ -4,12 +4,20 @@
 #include <android/native_window.h>
 #include <android/native_window_jni.h>
 #include <jni.h>
+#include <sys/system_properties.h>
 #include <fstream>
 #include "AndroidThreadPrioValues.hpp"
 #include "helper/NDKHelper.hpp"
 #include "helper/NDKThreadHelper.hpp"
+#include "colortrans.h"
 
 #define TAG "pixelpilot"
+
+// OpenIPC "Overshoot Fix" colortrans reversal params — read by the GL fan-out video shader
+// (GLFanoutRenderer.h), set from the settings menu via nativeSetColortrans below.
+std::atomic<float> g_ct_enable{0.f};
+std::atomic<float> g_ct_gain{2.5f};
+std::atomic<float> g_ct_offset{-0.15f};
 
 VideoPlayer::VideoPlayer(JNIEnv* env, jobject context)
     : mParser{std::bind(&VideoPlayer::onNewNALU, this, std::placeholders::_1)}, videoDecoder(env)
@@ -192,6 +200,14 @@ void VideoPlayer::processQueue()
 // Not yet parsed bit stream (e.g. raw h264 or rtp data)
 void VideoPlayer::onNewRTPData(const uint8_t* data, const std::size_t data_length)
 {
+    // Guard against an empty/short datagram before the RTPPacket ctor dereferences `data`.
+    if (data == nullptr || data_length < sizeof(rtp_header_t))
+    {
+        return;
+    }
+    // Both the UDP (:5600) and UDS receiver threads land here and mutate the (unlocked) reorder
+    // queues + mParser — serialize them or the unordered_map heap corrupts (SIGSEGV in bufferPacket).
+    std::lock_guard<std::mutex> rtpLk(mRtpMtx);
     // Parse the RTP packet
     const RTP::RTPPacket rtpPacket(data, data_length);
     uint16_t             idx = rtpPacket.header.getSequence();
@@ -199,6 +215,11 @@ void VideoPlayer::onNewRTPData(const uint8_t* data, const std::size_t data_lengt
     // Define the callback based on payload type
     auto callback = [&](const uint8_t* packet_data, std::size_t packet_length)
     {
+        // A reordered/empty buffered packet can arrive as (nullptr, 0); don't hand it downstream.
+        if (packet_data == nullptr || packet_length == 0)
+        {
+            return;
+        }
         if (rtpPacket.header.payload == RTP_PAYLOAD_TYPE_AUDIO)
         {
             audioDecoder.enqueueAudio(packet_data, packet_length);
@@ -232,7 +253,17 @@ void VideoPlayer::onNewRTPData(const uint8_t* data, const std::size_t data_lengt
 void VideoPlayer::onNewNALU(const NALU& nalu)
 {
     videoDecoder.interpretNALU(nalu);
-    if (dvr_fd <= 0 || latestDecodingInfo.currentFPS <= 0)
+    // Decoded-stream DVR transcoder is OPT-IN (default OFF). On MTK it needs a 2nd HEVC decoder +
+    // an H.264 encoder concurrently with the live decoder; at 720p120 that exhausts codec2, the
+    // encoder/decoder fails to start, and AMediaCodec_delete on the failed (already-torn-down)
+    // codec aborts with "decStrong too many times". Live decode + video are unaffected either way.
+    // Enable for testing with: setprop debug.pixelpilot.dvrtranscode 1
+    static const bool kDvrTranscode = [] {
+        char v[PROP_VALUE_MAX] = {0};
+        __system_property_get("debug.pixelpilot.dvrtranscode", v);
+        return v[0] == '1';
+    }();
+    if (dvr_fd <= 0 || latestDecodingInfo.currentFPS <= 0 || !kDvrTranscode)
     {
         return;
     }
@@ -532,6 +563,17 @@ Java_com_openipc_videonative_VideoPlayer_nativeGetVideoCodec(JNIEnv*, jclass, jl
 extern "C" JNIEXPORT void JNICALL
 Java_com_openipc_videonative_VideoPlayer_nativeSetVideoFlushMs(JNIEnv*, jclass, jlong ni, jint ms)
 { native(ni)->videoDecoder.setFlushThresholdMs((int) ms); }
+
+// OpenIPC "Overshoot Fix" colortrans reversal — set from the settings menu. Writes the
+// globals the GL fan-out video shader reads each frame (ni unused; params are process-global).
+extern "C" JNIEXPORT void JNICALL
+Java_com_openipc_videonative_VideoPlayer_nativeSetColortrans(JNIEnv*, jclass, jlong /*ni*/,
+                                                             jboolean enable, jfloat gain, jfloat offset)
+{
+    g_ct_enable.store(enable ? 1.f : 0.f);
+    g_ct_gain.store((float) gain);
+    g_ct_offset.store((float) offset);
+}
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_openipc_videonative_VideoPlayer_nativeIsRecording(JNIEnv* env, jclass clazz, jlong native_instance)

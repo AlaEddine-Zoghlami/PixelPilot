@@ -23,7 +23,10 @@
 #include <GLES2/gl2ext.h>
 #include <atomic>
 #include <time.h>
+#include <cstdlib>
+#include <sys/system_properties.h>
 #include "GLFanoutEncoder.h"
+#include "colortrans.h"
 
 class GLFanoutRenderer
 {
@@ -196,16 +199,30 @@ class GLFanoutRenderer
         static const char* VS =
             "attribute vec4 aPos; attribute vec2 aUV; uniform mat4 uTex;"
             "varying vec2 vUV; void main(){ vUV=(uTex*vec4(aUV,0.,1.)).xy; gl_Position=aPos; }";
+        // OpenIPC "Overshoot Fix" colortrans reversal (ported from OpenIPC/PixelPilot_rk
+        // osd_gl.cpp). The VTX's _colortrans.bin sensor calibration pre-flattens contrast
+        // (video looks washed-out/gray) to cut H.26x edge overshoot; the VRX must expand it
+        // back. Inverse transform per channel: out = clamp((in + offset) * gain, 0, 1)
+        // (gain/offset default 2.5 / -0.15, matching PixelPilot_rk). uCtEnable mixes it in so
+        // OFF (default) is a pure passthrough.
         static const char* FS =
             "#extension GL_OES_EGL_image_external : require\n"
             "precision mediump float; varying vec2 vUV; uniform samplerExternalOES uTexOes;"
-            "void main(){ gl_FragColor = texture2D(uTexOes, vUV); }";
+            "uniform float uCtEnable; uniform float uCtGain; uniform float uCtOffset;"
+            "void main(){"
+            "  vec4 c = texture2D(uTexOes, vUV);"
+            "  vec3 rev = clamp((c.rgb + uCtOffset) * uCtGain, 0.0, 1.0);"
+            "  gl_FragColor = vec4(mix(c.rgb, rev, uCtEnable), c.a);"
+            "}";
         prog_ = link(VS, FS);
         if (!prog_) return fail("link program");
         aPos_    = glGetAttribLocation(prog_, "aPos");
         aUV_     = glGetAttribLocation(prog_, "aUV");
         uTex_    = glGetUniformLocation(prog_, "uTex");
         uTexOes_ = glGetUniformLocation(prog_, "uTexOes");
+        uCtEnable_ = glGetUniformLocation(prog_, "uCtEnable");
+        uCtGain_   = glGetUniformLocation(prog_, "uCtGain");
+        uCtOffset_ = glGetUniformLocation(prog_, "uCtOffset");
         // Fullscreen quad (triangle strip): interleaved pos.xy, uv.xy.
         static const float quad[] = {
             -1.f, -1.f, 0.f, 0.f,   1.f, -1.f, 1.f, 0.f,
@@ -253,6 +270,22 @@ class GLFanoutRenderer
         glBindTexture(GL_TEXTURE_EXTERNAL_OES, oesTex_);
         glUniform1i(uTexOes_, 0);
         glUniformMatrix4fv(uTex_, 1, GL_FALSE, texMatrix);
+        // colortrans reversal params from props (live-tunable, no rebuild):
+        //   debug.pixelpilot.colortrans = 1  -> enable the un-wash
+        //   debug.pixelpilot.ct_gain   (default 2.5)   debug.pixelpilot.ct_offset (default -0.15)
+        {
+            // enable + gain/offset come from the settings menu (globals set via
+            // VideoPlayer.nativeSetColortrans). A debug.pixelpilot.colortrans=1 prop can also
+            // force-enable, and ct_gain/ct_offset props override for live tuning without a rebuild.
+            char cp[PROP_VALUE_MAX] = {0}, gp[PROP_VALUE_MAX] = {0}, op[PROP_VALUE_MAX] = {0};
+            __system_property_get("debug.pixelpilot.colortrans", cp);
+            float ctEnable = (cp[0] == '1' || g_ct_enable.load() > 0.5f) ? 1.0f : 0.0f;
+            float ctGain   = (__system_property_get("debug.pixelpilot.ct_gain", gp)   > 0) ? (float) atof(gp) : g_ct_gain.load();
+            float ctOffset = (__system_property_get("debug.pixelpilot.ct_offset", op) > 0) ? (float) atof(op) : g_ct_offset.load();
+            glUniform1f(uCtEnable_, ctEnable);
+            glUniform1f(uCtGain_,   ctGain);
+            glUniform1f(uCtOffset_, ctOffset);
+        }
         glBindBuffer(GL_ARRAY_BUFFER, vbo_);
         glEnableVertexAttribArray(aPos_);
         glVertexAttribPointer(aPos_, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*) 0);
@@ -306,6 +339,7 @@ class GLFanoutRenderer
     EGLSurface encSurfRaw_ = EGL_NO_SURFACE;
     GLuint     prog_ = 0, osdProg_ = 0, oesTex_ = 0, osdTex_ = 0, vbo_ = 0;
     GLint      aPos_ = -1, aUV_ = -1, uTex_ = -1, uTexOes_ = -1;
+    GLint      uCtEnable_ = -1, uCtGain_ = -1, uCtOffset_ = -1;
     GLint      osdPos_ = -1, osdUV_ = -1, osdTexLoc_ = -1, osdScaleLoc_ = -1;
     EGLint     vpW_ = 0, vpH_ = 0;
     int        osdTexW_ = 0, osdTexH_ = 0;

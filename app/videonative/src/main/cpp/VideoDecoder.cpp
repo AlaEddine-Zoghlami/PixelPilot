@@ -176,23 +176,28 @@ void VideoDecoder::configureStartDecoder(int idx)
         __system_property_get("ro.build.version.sdk", sdkStr);
         __system_property_get("debug.pixelpilot.hwhevc", hwHevc);   // "1" = keep the MTK HW HEVC decoder
         std::string plat(platform);
-        // The SW HEVC fallback is only needed when the MTK HW HEVC renders black to a DIRECT
-        // SurfaceView. We render via the GL fan-out (SurfaceTexture->GL), where the HW HEVC renders
-        // correctly — and SW HEVC is ~8 ms/frame (CPU-bound, can't sustain 720p120 => "slow"/stutter).
-        // So `setprop debug.pixelpilot.hwhevc 1` keeps the fast HW HEVC decoder for testing; default
-        // still forces SW (safe). If HW renders cleanly via GL on this SoC, this becomes the default.
-        if (hwHevc[0] != '1' && plat.rfind("mt", 0) == 0 && atoi(sdkStr) >= 35)
+        bool mtk = (plat.rfind("mt", 0) == 0) && atoi(sdkStr) >= 35;
+        // MediaTek (Dimensity, api>=35): the HW HEVC decoder FREEZES after the first keyframe on this
+        // stream (VHT-2SS H265 1472x816 @120fps) — verified: HW decoded 2 frames then stuck, SW climbs
+        // 0→478→570. (It also renders black to a direct SurfaceView, androidx/media #2711/#2765.) So
+        // force the SOFTWARE HEVC decoder (c2.android.hevc.decoder), which sustains via our GL fan-out.
+        // debug.pixelpilot.hwhevc=1 forces HW back for testing.
+        if (hwHevc[0] != '1' && mtk)
         {
             __android_log_print(ANDROID_LOG_WARN, "VideoDecoder",
-                "MediaTek SoC '%s' HEVC HW decoder renders black -> forcing SW c2.android.hevc.decoder", plat.c_str());
+                "MediaTek SoC '%s' (api>=35): HW HEVC freezes -> forcing SW c2.android.hevc.decoder", plat.c_str());
             AMediaCodec_delete(decoder.codec[idx]);
             AMediaCodec* sw = AMediaCodec_createCodecByName("c2.android.hevc.decoder");
             decoder.codec[idx] = (sw != nullptr) ? sw : AMediaCodec_createDecoderByType(MIME.c_str());
+            // The SW HEVC decoder's output is always >60ms old, so the flush-to-keyframe path would
+            // fire every frame -> renderFps=0 (black/freeze) + a flush storm. Disable it; drop-to-
+            // freshest still caps latency.
+            mFlushThresholdMs = 0;
         }
         else if (hwHevc[0] == '1')
         {
             __android_log_print(ANDROID_LOG_WARN, "VideoDecoder",
-                "debug.pixelpilot.hwhevc=1 -> keeping MTK HW HEVC decoder (GL fan-out renders it; ~8x faster than SW)");
+                "debug.pixelpilot.hwhevc=1 -> keeping MTK HW HEVC decoder (may freeze on this SoC)");
         }
     }
 
@@ -206,8 +211,9 @@ void VideoDecoder::configureStartDecoder(int idx)
     // Adapted from the PixelPilot-MTK-Optimized fork (thamtrung151). For FPV we prioritise glass-
     // to-glass latency over smoothness: real-time priority, low-latency decode, small buffer queues
     // (less queuing delay), and — on MediaTek — the vendor low-latency key + a high operating-rate.
-    // Gated so it can be A/B'd at runtime WITHOUT a rebuild: `setprop debug.pixelpilot.mtkopt 1`
-    // enables it, `0`/unset = default-off legacy. (debug.* is shell-settable on non-rooted devices;
+    // DEFAULT ON — for FPV we prioritise lag: render only the freshest decoded frame (drop the
+    // backlog, see checkOutputLoop) + low-latency decode keys. `setprop debug.pixelpilot.mtkopt 0`
+    // opts OUT (legacy full-render-in-order). (debug.* is shell-settable on non-rooted devices;
     // a custom persist.* is blocked by SELinux.) Generic keys (low-latency/priority) are harmless on
     // devices that ignore them; the vendor.mtk key is SoC-gated.
     {
@@ -215,7 +221,7 @@ void VideoDecoder::configureStartDecoder(int idx)
         char plat[PROP_VALUE_MAX] = {0};
         __system_property_get("debug.pixelpilot.mtkopt", gate);
         __system_property_get("ro.board.platform", plat);
-        mLowLatencyOpt   = (gate[0] == '1');                       // default OFF; opt-in: setprop ... 1
+        mLowLatencyOpt   = (gate[0] != '0');                       // default ON (lag priority); opt-out: setprop ... 0
         mIsMtk           = std::string(plat).rfind("mt", 0) == 0;
         const bool isMtk = mIsMtk;
         if (mLowLatencyOpt)
@@ -322,39 +328,72 @@ void VideoDecoder::feedDecoder(const NALU& nalu, int idx)
     const auto deltaParsing = now - nalu.creationTime;
     while (true)
     {
-        const auto index = AMediaCodec_dequeueInputBuffer(decoder.codec[idx], BUFFER_TIMEOUT_US);
-        if (index >= 0)
+        ssize_t index;
         {
-            size_t   inputBufferSize;
-            uint8_t* buf = AMediaCodec_getInputBuffer(decoder.codec[idx], (size_t) index, &inputBufferSize);
-            // I have not seen any case where the input buffer returned by MediaCodec is too small to hold the NALU
-            // But better be safe than crashing with a memory exception
-            if (nalu.getSize() > inputBufferSize)
+            // Hold the flush-mutex across dequeue+queue so checkOutputLoop's AMediaCodec_flush
+            // cannot run concurrently (that races the framework's async input-buffer reply and
+            // abort()s at MediaCodec.cpp:4310). Lock scope is bounded by the 5ms dequeue timeout;
+            // released before the spin/timeout handling below so flush isn't blocked while we wait.
+            std::lock_guard<std::mutex> lk(mCodecFlushMtx[idx]);
+            if (!decoder.codec[idx]) return;
+            index = AMediaCodec_dequeueInputBuffer(decoder.codec[idx], BUFFER_TIMEOUT_US);
+            if (index >= 0)
             {
-                MLOGD << "Nalu too big" << nalu.getSize();
+                size_t   inputBufferSize = 0;
+                uint8_t* buf = AMediaCodec_getInputBuffer(decoder.codec[idx], (size_t) index, &inputBufferSize);
+                // getInputBuffer can return NULL for a valid index if the codec was flushed or
+                // reconfigured concurrently. memcpy into NULL => SIGSEGV. Drop this NALU if gone.
+                if (buf == nullptr) return;
+                // I have not seen any case where the input buffer returned by MediaCodec is too small to hold the NALU
+                // But better be safe than crashing with a memory exception
+                if (nalu.getSize() > inputBufferSize)
+                {
+                    MLOGD << "Nalu too big" << nalu.getSize();
+                    return;
+                }
+
+                int flag =
+                    (IS_H265 && (nalu.isSPS() || nalu.isPPS() || nalu.isVPS())) ? AMEDIACODEC_BUFFER_FLAG_CODEC_CONFIG : 0;
+                // DIAG: keyframe cadence. H265 IDR = type 19/20, VPS = 32. The dongle freeze is the
+                // decoder waiting for an IDR after loss corrupts a reference; the freeze length ≈ the
+                // IDR interval. Log the gap between keyframes so we can see the practical GOP.
+                if (IS_H265)
+                {
+                    int nt = nalu.get_nal_unit_type();
+                    if (nt == 19 || nt == 20 || nt == 32)
+                    {
+                        static auto     lastKf = steady_clock::now();
+                        const auto      n2     = steady_clock::now();
+                        const long long ms     = duration_cast<milliseconds>(n2 - lastKf).count();
+                        lastKf                 = n2;
+                        __android_log_print(ANDROID_LOG_INFO, "kf-cadence",
+                            "keyframe NALU type=%d gap=%lldms size=%d", nt, ms, (int) nalu.getSize());
+                    }
+                }
+                std::memcpy(buf, nalu.getData(), (size_t) nalu.getSize());
+                const uint64_t presentationTimeUS =
+                    (uint64_t) duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
+                AMediaCodec_queueInputBuffer(
+                    decoder.codec[idx], (size_t) index, 0, (size_t) nalu.getSize(), presentationTimeUS, flag);
+                waitForInputB.add(steady_clock::now() - now);
+                parsingTime.add(deltaParsing);
                 return;
             }
-
-            int flag =
-                (IS_H265 && (nalu.isSPS() || nalu.isPPS() || nalu.isVPS())) ? AMEDIACODEC_BUFFER_FLAG_CODEC_CONFIG : 0;
-            std::memcpy(buf, nalu.getData(), (size_t) nalu.getSize());
-            const uint64_t presentationTimeUS =
-                (uint64_t) duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
-            AMediaCodec_queueInputBuffer(
-                decoder.codec[idx], (size_t) index, 0, (size_t) nalu.getSize(), presentationTimeUS, flag);
-            waitForInputB.add(steady_clock::now() - now);
-            parsingTime.add(deltaParsing);
-            return;
         }
-        else if (index == AMEDIACODEC_INFO_TRY_AGAIN_LATER)
+        if (index == AMEDIACODEC_INFO_TRY_AGAIN_LATER)
         {
             // Spin-wait: at 120fps the decode pipeline needs every µs.
             // Sleeping here (even 0.5ms) starves the decoder input at high frame rates.
+            // BUT this runs on the shared parse/RX thread — if the decoder's input buffers stay
+            // full (a real backlog), blocking here also stops NALU parsing and RX draining, so the
+            // UDP socket overflows -> packet loss -> more decode errors (a cascade). For lag
+            // priority, cap the wait low and DROP this NALU instead of stalling RX; drop-to-freshest
+            // on the output side keeps input buffers freeing quickly so this rarely trips.
             const auto elapsedTimeTryingForBuffer = std::chrono::steady_clock::now() - now;
-            if (elapsedTimeTryingForBuffer > std::chrono::seconds(1))
+            if (elapsedTimeTryingForBuffer > std::chrono::milliseconds(100))
             {
-                MLOGE << "AMEDIACODEC_INFO_TRY_AGAIN_LATER for more than 1 second "
-                      << MyTimeHelper::R(elapsedTimeTryingForBuffer) << "return.";
+                MLOGE << "AMEDIACODEC_INFO_TRY_AGAIN_LATER for >100ms "
+                      << MyTimeHelper::R(elapsedTimeTryingForBuffer) << " — drop NALU, unblock RX.";
                 return;
             }
         }
@@ -391,12 +430,20 @@ void VideoDecoder::checkOutputLoop(int idx)
             {
                 AMediaCodecBufferInfo ni;
                 ssize_t               nextIdx;
-                while (decoder.codec[idx]
+                // CAP the number of stale buffers dropped per tick. Releasing a big backlog in one
+                // tight burst (the dongle's bursty/lossy delivery queues many frames at once) storms
+                // the codec2 shared buffer pool and corrupts its page accounting →
+                // libstagefright_aidl_bufferpool2 "invalid page index" je_free abort. Draining a few
+                // per tick still catches up to the freshest frame within ~1-2 ticks but keeps the
+                // release rate sane. phone-Wi-Fi rarely has a backlog so it's unaffected.
+                int dropped = 0;
+                while (decoder.codec[idx] && dropped < 4
                        && (nextIdx = AMediaCodec_dequeueOutputBuffer(decoder.codec[idx], &ni, 0)) >= 0)
                 {
                     AMediaCodec_releaseOutputBuffer(decoder.codec[idx], (size_t) index, false);  // drop stale
                     index = nextIdx;
                     info  = ni;
+                    ++dropped;
                 }
             }
             const auto    now   = steady_clock::now();
@@ -413,7 +460,10 @@ void VideoDecoder::checkOutputLoop(int idx)
             if (idx == 0 && mFlushThresholdMs > 0 &&
                 (nowUS - info.presentationTimeUs) > (int64_t)mFlushThresholdMs * 1000)
             {
-                AMediaCodec_flush(decoder.codec[idx]);
+                // Serialize against feedDecoder's input dequeue (see mCodecFlushMtx) — concurrent
+                // flush + dequeueInputBuffer abort()s in the MediaCodec framework.
+                std::lock_guard<std::mutex> lk(mCodecFlushMtx[idx]);
+                if (decoder.codec[idx]) AMediaCodec_flush(decoder.codec[idx]);
                 continue;
             }
             AMediaCodec_releaseOutputBuffer(decoder.codec[idx], (size_t) index, true);

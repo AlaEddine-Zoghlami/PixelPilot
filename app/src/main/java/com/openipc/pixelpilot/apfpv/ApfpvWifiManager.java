@@ -67,8 +67,13 @@ public class ApfpvWifiManager {
     private static final int    LQ_PERIOD_MS = 100;
 
     private ConnectivityManager.NetworkCallback netCb;
+    // Outstanding request that holds the no-internet Wi-Fi (VTX AP) UP so Android
+    // does not tear it down in favour of validated cellular (the "phone keeps
+    // disconnecting from OpenIPC" / locallyGenerated reason-3 loop).
+    private ConnectivityManager.NetworkCallback holdCb;
     private volatile Network boundNetwork;
     private volatile boolean running = false;
+    private volatile boolean ampduPushed = false;   // pushed rtw_ampdu_enable=1 to the VTX this session
 
     private Thread rssiThread, lqThread;
     private final Handler ui = new Handler(Looper.getMainLooper());
@@ -101,8 +106,15 @@ public class ApfpvWifiManager {
         if (cur != null) {
             boundNetwork = cur;
             try { cm.bindProcessToNetwork(cur); } catch (Exception ignored) {}
+            // bindProcessToNetwork only ROUTES our sockets to Wi-Fi — it does NOT keep
+            // the network alive. The VTX AP has no uplink, so if mobile data is on (and
+            // internet-validated), Android drops the AP for cellular (locallyGenerated
+            // reason 3, in a reconnect loop). Hold an outstanding no-INTERNET Wi-Fi
+            // request so ConnectivityService keeps the AP up while we're streaming.
+            holdWifiNoInternet();
             emitState((looksLikeApfpv(cur) ? "APFPV on current Wi-Fi (VTX 192.168.0.1)"
                                            : "using current Wi-Fi") + " — listening for RTP on :5600");
+            maybeSetVtxAmpduOn(cur);
             startRssiLoop();
             startLqLoop();
             return;
@@ -138,6 +150,7 @@ public class ApfpvWifiManager {
                 emitState(looksLikeApfpv(network)
                         ? "APFPV found on " + ssid + " (VTX 192.168.0.1)"
                         : "Connected to " + ssid + " — APFPV not found");
+                maybeSetVtxAmpduOn(network);
                 startRssiLoop();
                 startLqLoop();
             }
@@ -156,14 +169,71 @@ public class ApfpvWifiManager {
         }
     }
 
+    /**
+     * Hold an outstanding request for a Wi-Fi network that does NOT require INTERNET.
+     * ConnectivityService counts this as a reason to keep the VTX AP up, so it won't
+     * reap the no-uplink AP in favour of validated cellular — the app-side equivalent
+     * of `settings put global network_avoid_bad_wifi 0`, but scoped to us and needing
+     * no special permission. Re-binds the process on (re)availability so video/SSH
+     * keep flowing over Wi-Fi. Safe to call when already on the AP.
+     */
+    private void holdWifiNoInternet() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) return;
+        if (holdCb != null) return;
+        NetworkRequest hold = new NetworkRequest.Builder()
+                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .build();
+        holdCb = new ConnectivityManager.NetworkCallback() {
+            @Override public void onAvailable(Network network) {
+                boundNetwork = network;
+                try { cm.bindProcessToNetwork(network); } catch (Exception ignored) {}
+            }
+        };
+        try {
+            cm.requestNetwork(hold, holdCb);
+        } catch (Exception e) {
+            holdCb = null; // best-effort; bindProcessToNetwork still routes our sockets
+        }
+    }
+
+    /**
+     * Phone-Wi-Fi is the active client → the VTX should run A-MPDU ON (the phone CAN emit the
+     * compressed BlockAck, so aggregation lifts it to ~30 Mbps). Push rtw_ampdu_enable=1 over SSH,
+     * once per session, only if this AP is actually an APFPV VTX. The process is already bound to
+     * this Wi-Fi (bindProcessToNetwork), so AirSshClient's socket to 192.168.0.1 travels over it.
+     * Mirrors the dongle path in ApfpvLinkManager which pushes =0. Pref-gated (apfpv_auto_ampdu).
+     */
+    private void maybeSetVtxAmpduOn(Network net) {
+        if (ampduPushed || net == null || !looksLikeApfpv(net)) return;
+        boolean auto = ctx.getSharedPreferences("pixelpilot", Context.MODE_PRIVATE)
+                .getBoolean("apfpv_auto_ampdu", true);
+        if (!auto) return;
+        ampduPushed = true;
+        ui.postDelayed(() -> {
+            AirSshClient ssh = new AirSshClient();
+            ssh.useApfpvHost();   // 192.168.0.1 over the bound Wi-Fi
+            ssh.setAmpdu(true, (ok, out) -> {
+                com.openipc.pixelpilot.Telemetry.event("apfpv_set_ampdu", "on", "true", "ok", String.valueOf(ok));
+                if (!ok) ampduPushed = false;   // retry on the next connect
+                emitState("VTX A-MPDU ON " + (ok ? "applied (phone-Wi-Fi)" : "failed"));
+            });
+        }, 1500);   // small delay so the association/route settles before SSH
+    }
+
     public synchronized void stop() {
         running = false;
+        ampduPushed = false;   // re-push on the next association
         if (rssiThread != null) { rssiThread.interrupt(); rssiThread = null; }
         if (lqThread != null)   { lqThread.interrupt();   lqThread = null; }
         try { cm.bindProcessToNetwork(null); } catch (Exception ignored) {}
         if (netCb != null) {
             try { cm.unregisterNetworkCallback(netCb); } catch (Exception ignored) {}
             netCb = null;
+        }
+        if (holdCb != null) {
+            try { cm.unregisterNetworkCallback(holdCb); } catch (Exception ignored) {}
+            holdCb = null;
         }
         boundNetwork = null;
         emitState("stopped");

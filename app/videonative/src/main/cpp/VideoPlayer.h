@@ -73,6 +73,11 @@ class VideoPlayer
     JavaVM*             javaVm = nullptr;
     H26XParser          mParser;
     BufferedPacketQueue mBufferedPacketQueueVideo, mBufferedPacketQueueAudio;
+    // onNewRTPData is invoked by BOTH receiver threads (UDPReceiver :5600 AND UDSReceiver),
+    // and it mutates shared state with NO internal locking: the reorder maps
+    // (mBufferedPacketQueue*) and mParser. Concurrent calls corrupted the unordered_map's
+    // heap (SIGSEGV in bufferPacket -> operator[]). Serialize the whole RTP path.
+    std::mutex          mRtpMtx;
 
     // DVR attributes
     int                     dvr_fd;

@@ -42,7 +42,9 @@ public class AirSshClient {
             Session session = null;
             StringBuilder out = new StringBuilder();
             boolean ok = true;
+            long t0 = System.currentTimeMillis();
             try {
+                android.util.Log.i("AirSsh", "connect " + user + "@" + host + ":" + port + " (timeout " + timeoutMs + "ms)");
                 JSch jsch = new JSch();
                 session = jsch.getSession(user, host, port);
                 session.setPassword(pass);
@@ -52,6 +54,7 @@ public class AirSshClient {
                 session.setConfig(cfg);
                 session.setTimeout(timeoutMs);
                 session.connect(timeoutMs);
+                android.util.Log.i("AirSsh", "connected in " + (System.currentTimeMillis() - t0) + "ms");
 
                 for (String cmd : commands) {
                     ChannelExec ch = (ChannelExec) session.openChannel("exec");
@@ -74,6 +77,8 @@ public class AirSshClient {
             } catch (Exception e) {
                 ok = false;
                 out.append("SSH error: ").append(e.getMessage());
+                android.util.Log.e("AirSsh", "FAILED after " + (System.currentTimeMillis() - t0) + "ms to "
+                    + host + ":" + port + " -> " + e.getClass().getSimpleName() + ": " + e.getMessage());
             } finally {
                 if (session != null) session.disconnect();
             }
@@ -117,6 +122,28 @@ public class AirSshClient {
     public void setHue(int v, Result cb)          { setCamera(".image.hue", String.valueOf(v), cb); }
     public void setMirror(boolean on, Result cb)  { setCamera(".image.mirror", on ? "true" : "false", cb); }
     public void setFlip(boolean on, Result cb)    { setCamera(".image.flip", on ? "true" : "false", cb); }
+
+    /**
+     * A-MPDU on/off on the VTX Wi-Fi driver. `rtw_ampdu_enable` is a module parameter
+     * (writable 0644) exposed at /sys/module/<drv>/parameters/rtw_ampdu_enable. The driver
+     * name varies by VTX build (8812eu / 88x2cu / 8822cu / 8733bu…), so write to WHICHEVER
+     * module exposes the param — module-name-agnostic. Then echo back the resulting values
+     * so the callback output confirms what actually took.
+     *
+     * WHY: the userspace dongle can't emit the SIFS compressed BlockAck, so with A-MPDU ON the
+     * VTX's rate-controller collapses the dongle's link to MCS0 (~2 Mbps). Phone-Wi-Fi CAN do
+     * BlockAck and wants A-MPDU ON (~30 Mbps). So the correct value depends on the active client:
+     * dongle → 0, phone-Wi-Fi → 1. (See the throughput analysis / apfpv-hw-blockack notes.)
+     */
+    public void setAmpdu(boolean on, Result cb) {
+        String v = on ? "1" : "0";
+        String cmd =
+            "n=0; for p in /sys/module/*/parameters/rtw_ampdu_enable; do "
+          + "[ -e \"$p\" ] && echo " + v + " > \"$p\" && n=$((n+1)); done; "
+          + "echo \"wrote=" + v + " modules=$n\"; "
+          + "grep -H . /sys/module/*/parameters/rtw_ampdu_enable 2>/dev/null";
+        run(new String[]{ cmd }, cb);
+    }
 
     /** aalink: sed -i /etc/aalink.conf + kill -SIGHUP $(pidof aalink) (gsmenu pattern). */
     public void setAalink(String key, String value, Result cb) {

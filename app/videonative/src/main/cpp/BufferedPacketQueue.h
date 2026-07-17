@@ -252,33 +252,25 @@ class BufferedPacketQueue
         {
             logWarning("Processing %zu buffered packets that might be out of order.", mPackets.size());
 
-            // Create a vector of iterators to the map elements
-            std::vector<std::unordered_map<uint16_t, std::vector<uint8_t>>::const_iterator> sortedPackets;
-            sortedPackets.reserve(mPackets.size());
-
-            // Populate the vector with iterators to the map elements
-            for (auto it = mPackets.cbegin(); it != mPackets.cend(); ++it)
-            {
-                sortedPackets.push_back(it);
-            }
-
-            // Sort the vector based on the keys
-            std::sort(
-                sortedPackets.begin(),
-                sortedPackets.end(),
-                [](const auto& a, const auto& b) { return a->first < b->first; });
-
-            // Iterate over the sorted packets and invoke the callback
-            for (const auto& it : sortedPackets)
-            {
-                const auto& packet = it->second;
-                logDebug("Processing possibly out-of-order buffered packet with Sequence=%u.", it->first);
-                callback(packet.data(), packet.size());
-            }
-
+            // MOVE the packets out into an owned, sorted vector and CLEAR the map BEFORE running
+            // any callback. The previous version held const_iterators INTO mPackets across the
+            // callbacks and cleared afterwards — if the callback (or heavy reorder/loss churn on
+            // the lossy dongle path) perturbed the map, those iterators dangled and the trailing
+            // clear()/free tripped a heap-corruption SIGABRT. Owning copies removes that hazard.
+            std::vector<std::pair<uint16_t, std::vector<uint8_t>>> sorted;
+            sorted.reserve(mPackets.size());
+            for (auto& kv : mPackets) sorted.emplace_back(kv.first, std::move(kv.second));
             mPackets.clear();
-            // Reset the monotonic increase counter
             mMonotonicOutOfOrderIncreaseCount = 0;
+
+            std::sort(sorted.begin(), sorted.end(),
+                      [](const auto& a, const auto& b) { return a.first < b.first; });
+
+            for (const auto& kv : sorted)
+            {
+                logDebug("Processing possibly out-of-order buffered packet with Sequence=%u.", kv.first);
+                callback(kv.second.data(), kv.second.size());
+            }
         }
         mLastPacketIdx = currPacketIdx;
     }

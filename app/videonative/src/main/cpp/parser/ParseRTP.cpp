@@ -92,7 +92,12 @@ bool RTPDecoder::validateRTPPacket(const rtp_header_t& rtp_header)
 
 void RTPDecoder::h264_reconstruct_and_forward_one_nalu(const uint8_t* data, const int data_size)
 {
-    assert(data_size > sizeof(nalu_header_t));
+    // data_size must cover at least the 1-byte NALU header; otherwise data_size-1 below underflows
+    // to SIZE_MAX (append_nalu_data would then attempt an enormous copy). Reject runts.
+    if (data == nullptr || data_size <= (int) sizeof(nalu_header_t))
+    {
+        return;
+    }
     const nalu_header_t& nalu_header = *(const nalu_header_t*) &data[0];
     timePointStartOfReceivingNALU    = std::chrono::steady_clock::now();
     // Full NALU - we can remove the 'drop packet' flag
@@ -194,20 +199,21 @@ void RTPDecoder::parseRTPH264toNALU(const uint8_t* rtp_data, const size_t data_l
     {
         // STAP-A aggregated NALUs
         const uint8_t* rtp_payload      = rtpPacket.rtpPayload;
-        const auto     rtp_payload_size = rtpPacket.rtpPayloadSize;
-        int            offset           = 0;
-        while (true)
+        const size_t   rtp_payload_size = rtpPacket.rtpPayloadSize;
+        // STAP-A: [1B STAP hdr] then repeating [2B size][size B nalu]. Every field is read from the
+        // (possibly corrupted) payload, so bound each access against rtp_payload_size before touching it.
+        size_t offset = 1;  // skip the 1-byte STAP-A NAL header
+        while (offset + 2 <= rtp_payload_size)
         {
-            const uint16_t* nalu_size_network = (const uint16_t*) &rtp_payload[offset + 1];
-            const uint16_t nalu_size = ntohs(*nalu_size_network);
-            const uint8_t* actual_nalu_data_p = &rtp_payload[offset + 1 + 2];
-            const auto     actual_nalu_size   = nalu_size;
-            h264_reconstruct_and_forward_one_nalu(actual_nalu_data_p, actual_nalu_size);
-            offset += 2 + actual_nalu_size;
-            if (!(rtp_payload_size > offset + 3))
+            const uint16_t* nalu_size_network = (const uint16_t*) &rtp_payload[offset];
+            const uint16_t  nalu_size         = ntohs(*nalu_size_network);
+            const size_t    data_off          = offset + 2;
+            if (nalu_size == 0 || data_off + nalu_size > rtp_payload_size)
             {
-                break;
+                break;  // truncated / malformed aggregation unit
             }
+            h264_reconstruct_and_forward_one_nalu(&rtp_payload[data_off], nalu_size);
+            offset = data_off + nalu_size;
         }
     }
     else if (nalu_header.type == 28)
@@ -267,27 +273,21 @@ void RTPDecoder::parseRTPH265toNALU(const uint8_t* rtp_data, const size_t data_l
     {
         // MLOGD<<"Got RTP H265 type 48 (aggregated) payload size:"<<rtpPacket.rtpPayloadSize;
         const uint8_t* rtp_payload      = rtpPacket.rtpPayload;
-        const auto     rtp_payload_size = rtpPacket.rtpPayloadSize;
-        int            offset           = 0;
-        while (true)
+        const size_t   rtp_payload_size = rtpPacket.rtpPayloadSize;
+        // H265 AP: [2B payload hdr] then repeating [2B size][size B nalu]. Bound every read against the
+        // payload size so a corrupted length can't drive an OOB read / runaway offset.
+        size_t offset = 2;  // skip the 2-byte AP payload header
+        while (offset + 2 <= rtp_payload_size)
         {
-            // the size of the (n-th) nalu starts at offset+1 (1 byte STAP-A NAL HDR )
-            // WTF DOND ?!
-            const int       don_offset        = 1;
-            const uint16_t* nalu_size_network = (const uint16_t*) &rtp_payload[offset + don_offset + 1];
-            // replaced htons to htohs -- seemingly there was a bug in the original code, but I can't test it to make
-            // sure.
-            const uint16_t nalu_size = ntohs(*nalu_size_network);
-            // While the NALU HDR of the (n-th) nalu starts at offset+3 (1 byte STAP-A NAL HDR, 2 bytes nalu size)
-            const uint8_t* actual_nalu_data_p = &rtp_payload[offset + don_offset + 1 + 2];
-            const auto     actual_nalu_size   = nalu_size;
-            // MLOGD<<"XNALU of size:"<<(int)actual_nalu_size;
-            h265_forward_one_nalu(actual_nalu_data_p, actual_nalu_size);
-            offset += 2 + actual_nalu_size;
-            if (!(rtp_payload_size > offset + 3))
+            const uint16_t* nalu_size_network = (const uint16_t*) &rtp_payload[offset];
+            const uint16_t  nalu_size         = ntohs(*nalu_size_network);
+            const size_t    data_off          = offset + 2;
+            if (nalu_size == 0 || data_off + nalu_size > rtp_payload_size)
             {
-                break;
+                break;  // truncated / malformed aggregation unit
             }
+            h265_forward_one_nalu(&rtp_payload[data_off], nalu_size);
+            offset = data_off + nalu_size;
         }
         return;
     }
@@ -302,6 +302,12 @@ void RTPDecoder::parseRTPH265toNALU(const uint8_t* rtp_data, const size_t data_l
         {
             // MLOGD<<"end of fu packetization";
             append_nalu_data(fu_payload, fu_payload_size);
+            // NOTE: forward UNCONDITIONALLY even if a fragment went missing. Tried gating this on
+            // !flagPacketHasGoneMissing (like H264) to drop corrupt NALUs — it made things WORSE:
+            // keyframes are the largest / most-fragmented NALUs, so on the lossy dongle link they're
+            // the most likely to lose a fragment; dropping them STARVES the decoder of IDRs → it
+            // freezes waiting for a clean keyframe. Feeding the partial NALU lets the HEVC decoder
+            // keep a reference and error-conceal. The real cure is fewer RX losses, not dropping here.
             forwardNALU(true);
             m_nalu_data_length = 0;
         }
@@ -374,6 +380,20 @@ void RTPDecoder::forwardNALU(const bool isH265)
 
 void RTPDecoder::append_nalu_data(const uint8_t* data, size_t data_len)
 {
+    // Guard data_len on its OWN first. A caller underflow (e.g. data_size==0 → data_size-1 == SIZE_MAX)
+    // makes `m_nalu_data_length + data_len` WRAP to a tiny value, silently passing the combined check
+    // below and turning the memcpy into a multi-GB OOB write = heap corruption (seen as je_free SIGABRT /
+    // null-deref later). Rejecting an oversized data_len up front closes that hole.
+    if (data == nullptr || data_len == 0 || data_len >= m_curr_nalu.size())
+    {
+        if (data_len >= m_curr_nalu.size())
+        {
+            MLOGD << "NALU append rejected — bad length " << data_len << " max:" << m_curr_nalu.size();
+            m_nalu_data_length       = 0;
+            flagPacketHasGoneMissing = true;
+        }
+        return;
+    }
     if (m_nalu_data_length + data_len >= m_curr_nalu.size())
     {
         MLOGD << "NALU buffer overflow — resetting. curr:" << m_nalu_data_length << " append:" << data_len << " max:" << m_curr_nalu.size();
@@ -407,20 +427,21 @@ void RTPDecoder::write_h264_h265_nalu_start(const bool use_4_bytes)
 {
     // m_curr_nalu=std::make_shared<std::array<uint8_t,NALU_MAXLEN>>();
     m_nalu_data_length = 0;
+    // NOTE: no assert() on m_nalu_data_length here — these run on every RTP packet and an assert()
+    // aborts the whole app on malformed/adversarial input (seen on the lossy dongle stream). The
+    // append_nalu_data() bounds guards already keep this safe; a short write just yields a dropped NALU.
     if (use_4_bytes)
     {
         append_nalu_data_byte(0);
         append_nalu_data_byte(0);
         append_nalu_data_byte(0);
         append_nalu_data_byte(1);
-        assert(m_nalu_data_length == 4);
     }
     else
     {
         append_nalu_data_byte(0);
         append_nalu_data_byte(0);
         append_nalu_data_byte(1);
-        assert(m_nalu_data_length == 3);
     }
 }
 

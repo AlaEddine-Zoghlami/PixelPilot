@@ -120,6 +120,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
     private boolean apfpvMode = false;   // true for EITHER apfpv mode (dongle or phone-wifi); see linkMode for which
     private volatile String lastWifiStatus = "idle";   // last APFPV phone-Wi-Fi status line
     private boolean vrxBeaconOn = false;                // VRX EIRP-cal beacon (master phone)
+    private boolean apModeOn = false;                   // WIP: dongle-as-AP (SoftAP) test
     static final String VRX_CAL_SSID = "APFPV-VRX-CAL"; // hardcoded SSID for the 2-phone EIRP rig
     private LinkModeCoordinator linkModeCoordinator;
 
@@ -415,6 +416,8 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
     private void initializeVideoPlayers() {
         videoPlayer = new VideoPlayer(this);
         videoPlayer.setIVideoParamsChanged(this);
+        // Restore the saved Overshoot Fix reversal (colortrans) setting.
+        videoPlayer.setColortrans(getColortransEnabled(), getColortransGain(), getColortransOffset());
 
         isVRMode = getVRSetting();
 
@@ -789,6 +792,77 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         }
     }
 
+    /** Read the saved colortrans (Overshoot Fix reversal) settings. */
+    private boolean getColortransEnabled() { return getSharedPreferences("general", MODE_PRIVATE).getBoolean("colortrans", false); }
+    private float   getColortransGain()    { return getSharedPreferences("general", MODE_PRIVATE).getFloat("ct_gain", 2.5f); }
+    private float   getColortransOffset()  { return getSharedPreferences("general", MODE_PRIVATE).getFloat("ct_offset", -0.15f); }
+
+    /** Overshoot Fix reversal: un-washes video from a VTX running the _colortrans.bin sensor
+     *  calibration. Applies a per-channel expand in the GL video shader; toggle + gain preset. */
+    private void setupColortransSubMenu(PopupMenu popup) {
+        SubMenu s = popup.getMenu().addSubMenu("Overshoot Fix reversal");
+        final boolean on = getColortransEnabled();
+        final float gain = getColortransGain();
+        final float offset = getColortransOffset();
+        s.add("State: " + (on ? "ON (gain " + gain + ")" : "OFF")).setEnabled(false);
+        s.add(on ? "Disable" : "Enable").setOnMenuItemClickListener(i -> {
+            boolean nv = !on;
+            getSharedPreferences("general", MODE_PRIVATE).edit().putBoolean("colortrans", nv).apply();
+            if (videoPlayer != null) videoPlayer.setColortrans(nv, gain, offset);
+            Toast.makeText(this, "Overshoot Fix reversal -> " + (nv ? "ON" : "OFF"), Toast.LENGTH_SHORT).show();
+            return true;
+        });
+        // Contrast-expand presets (bigger = stronger un-wash). Selecting one also enables.
+        for (final float g : new float[]{1.5f, 2.0f, 2.5f, 3.0f, 3.5f, 4.0f}) {
+            s.add("Gain " + g + (g == gain ? "  ✓" : "")).setOnMenuItemClickListener(i -> {
+                SharedPreferences.Editor e = getSharedPreferences("general", MODE_PRIVATE).edit();
+                e.putFloat("ct_gain", g).putBoolean("colortrans", true).apply();
+                if (videoPlayer != null) videoPlayer.setColortrans(true, g, offset);
+                Toast.makeText(this, "colortrans gain -> " + g + " (on)", Toast.LENGTH_SHORT).show();
+                return true;
+            });
+        }
+    }
+
+    /** Ensure the dongle VTX route (ApfpvVpnService) is up — prompting for VPN consent if needed.
+     *  Called automatically on the first dongle STREAMING (ApfpvLinkManager.maybeStartVtxRoute) so
+     *  the tunnel to 192.168.0.1 comes up without the user hunting the menu. Consent result lands
+     *  in onActivityResult(101), which starts the service. Safe to call repeatedly. */
+    public void ensureVtxRouteConsent() {
+        try {
+            Intent consent = VpnService.prepare(this);
+            if (consent != null) {
+                startActivityForResult(consent, 101);
+            } else {
+                startService(new Intent(this, ApfpvVpnService.class));
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "ensureVtxRouteConsent: " + e.getMessage());
+        }
+    }
+
+    /** Route VTX traffic (192.168.0.1) through the dongle via ApfpvVpnService, so AirSshClient
+     *  menu settings reach the VTX on the dongle path. Enable does the VpnService consent flow
+     *  (result handled in onActivityResult, request 101); Disable tears the TUN down. */
+    private void setupVtxRouteSubMenu(PopupMenu popup) {
+        SubMenu s = popup.getMenu().addSubMenu("VTX route via dongle (SSH)");
+        s.add("Enable — route 192.168.0.1 via dongle").setOnMenuItemClickListener(i -> {
+            Intent consent = VpnService.prepare(this);
+            if (consent != null) {
+                startActivityForResult(consent, 101);   // -> onActivityResult starts the service
+            } else {
+                startService(new Intent(this, ApfpvVpnService.class));
+                Toast.makeText(this, "VTX route via dongle: ON", Toast.LENGTH_SHORT).show();
+            }
+            return true;
+        });
+        s.add("Disable").setOnMenuItemClickListener(i -> {
+            startService(new Intent(this, ApfpvVpnService.class).setAction("STOP"));
+            Toast.makeText(this, "VTX route via dongle: OFF", Toast.LENGTH_SHORT).show();
+            return true;
+        });
+    }
+
     /**
      * Submenu handling OSD toggles and locks.
      */
@@ -1136,12 +1210,32 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         if (apfpvMode) return;   // WFB-ng mode only
         final com.openipc.pixelpilot.apfpv.AirSshClient ssh = new com.openipc.pixelpilot.apfpv.AirSshClient();
         com.openipc.pixelpilot.apfpv.GsMenuWfbng w = new com.openipc.pixelpilot.apfpv.GsMenuWfbng();
-        pickInt(popup, "Air MCS index", w.mcsIndex, 0, 7, 1, v -> ssh.setMcsIndex(v,(o,d)->{}));
-        pickInt(popup, "Air Width", w.width, 20, 40, 20, v -> ssh.setWidth(v,(o,d)->{}));
-        pickInt(popup, "Air FEC k", w.fecK, 1, 12, 1, v -> ssh.setFecK(v,(o,d)->{}));
-        pickInt(popup, "Air FEC n", w.fecN, 1, 16, 1, v -> ssh.setFecN(v,(o,d)->{}));
-        pickInt(popup, "Air channel", w.airChannel, 36, 165, 1, v -> ssh.setAirChannel(v,(o,d)->{}));
-        pickInt(popup, "Air TX power", w.airTxPower, 1, 30, 1, v -> ssh.setTxPower(v,(o,d)->{}));
+        pickInt(popup, "Air MCS index", w.mcsIndex, 0, 7, 1, v -> ssh.setMcsIndex(v,airFb("Air MCS index")));
+        pickInt(popup, "Air Width", w.width, 20, 40, 20, v -> ssh.setWidth(v,airFb("Air Width")));
+        pickInt(popup, "Air FEC k", w.fecK, 1, 12, 1, v -> ssh.setFecK(v,airFb("Air FEC k")));
+        pickInt(popup, "Air FEC n", w.fecN, 1, 16, 1, v -> ssh.setFecN(v,airFb("Air FEC n")));
+        pickInt(popup, "Air channel", w.airChannel, 36, 165, 1, v -> ssh.setAirChannel(v,airFb("Air channel")));
+        pickInt(popup, "Air TX power", w.airTxPower, 1, 30, 1, v -> ssh.setTxPower(v,airFb("Air TX power")));
+    }
+
+    /**
+     * Feedback callback for an AIR-side SSH setting change. Confirms (on the UI thread) whether
+     * the command actually landed AND which path it took — the dongle VTX route (ApfpvVpnService)
+     * or the phone's Wi-Fi. Answers "did this setting apply, and did it go via the dongle?".
+     */
+    private com.openipc.pixelpilot.apfpv.AirSshClient.Result airFb(final String label) {
+        return (ok, out) -> runOnUiThread(() -> {
+            final String route = ApfpvVpnService.sRunning ? "via dongle" : "via Wi-Fi";
+            final String msg;
+            if (ok) {
+                msg = "✓ " + label + " applied (" + route + ")";
+            } else {
+                String detail = (out == null) ? "" : out.trim();
+                if (detail.length() > 140) detail = detail.substring(0, 140) + "…";
+                msg = "✗ " + label + " FAILED (" + route + ")" + (detail.isEmpty() ? "" : ":\n" + detail);
+            }
+            Toast.makeText(this, msg, ok ? Toast.LENGTH_SHORT : Toast.LENGTH_LONG).show();
+        });
     }
 
     /** Full APFPV controls: connection (ssid/pw) + aalink + camera, when in APFPV mode. */
@@ -1208,8 +1302,41 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
                 }
                 return true;
             });
+        // WIP: bring the DONGLE up as a Wi-Fi AP (SoftAP) so a second device can associate — the
+        // Jaguar1 ENSWBCN software-beacon path. Uses the configured APFPV SSID+"-AP"/password/channel.
+        // Full HW beacon + client ACK needs the DEVOURER_AP_HWACK gate on (native env).
+        m.add(apModeOn ? "Dongle AP (test): ON — tap to stop" : "Dongle AP (test): start")
+            .setOnMenuItemClickListener(i -> {
+                if (apfpvLinkManager == null) return true;
+                if (apModeOn) {
+                    apfpvLinkManager.stopDongleAp(); apModeOn = false;
+                } else {
+                    String apSsid = getSharedPreferences("pixelpilot", MODE_PRIVATE)
+                            .getString("apfpv_ssid", "OpenIPC") + "-AP";
+                    String apPass = getSharedPreferences("pixelpilot", MODE_PRIVATE)
+                            .getString("apfpv_pass", "12345678");
+                    int ch = getSharedPreferences("pixelpilot", MODE_PRIVATE).getInt("apfpv_channel", 40);
+                    apModeOn = apfpvLinkManager.startDongleAp(apSsid, ch, apPass);
+                    if (apModeOn) Toast.makeText(this, "Dongle AP \"" + apSsid + "\" ch" + ch
+                            + " — scan for it on a 2nd device to test association", Toast.LENGTH_LONG).show();
+                }
+                return true;
+            });
         m.add("Reconnect").setOnMenuItemClickListener(i -> {
             if (apfpvLinkManager != null) apfpvLinkManager.refreshAdapters(); return true; });
+        // Auto A-MPDU: the app pushes rtw_ampdu_enable to the VTX to match the active client —
+        // dongle→OFF (can't emit compressed BlockAck; A-MPDU-on collapses it to ~2 Mbps),
+        // phone-Wi-Fi→ON (can BlockAck; aggregation → ~30 Mbps). Toggle to leave the VTX as-is.
+        boolean autoAmpdu = getSharedPreferences("pixelpilot", MODE_PRIVATE).getBoolean("apfpv_auto_ampdu", true);
+        m.add(autoAmpdu ? "Auto A-MPDU: ON (dongle→off · wifi→on)" : "Auto A-MPDU: OFF (VTX left as-is)")
+            .setOnMenuItemClickListener(i -> {
+                boolean cur = getSharedPreferences("pixelpilot", MODE_PRIVATE).getBoolean("apfpv_auto_ampdu", true);
+                getSharedPreferences("pixelpilot", MODE_PRIVATE).edit().putBoolean("apfpv_auto_ampdu", !cur).apply();
+                Toast.makeText(this, !cur
+                    ? "Auto A-MPDU ON — VTX aggregation follows the active client (dongle off / Wi-Fi on)"
+                    : "Auto A-MPDU OFF — VTX rtw_ampdu_enable left untouched", Toast.LENGTH_LONG).show();
+                return true;
+            });
         // Mode-aware status: dongle has the full funnel (adapter -> connecting ->
         // connected -> APFPV found/not-found); phone-Wi-Fi only the last stages.
         String apfpvStatus = (linkMode == LinkModeCoordinator.Mode.APFPV_WIFI)
@@ -1267,9 +1394,9 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         // aalink keys — each its OWN top-level submenu, exactly like Channel/Bandwidth
         pickString(popup, "aalink MCS source", cfg.mcsSource,
             new String[]{"lowest","highest","both","uplink","downlink"},
-            v -> { cfg.mcsSource = v; saveApfpv(cfg); ssh.setAalink("MCS_SOURCE", v, (o,d)->{}); });
+            v -> { cfg.mcsSource = v; saveApfpv(cfg); ssh.setAalink("MCS_SOURCE", v, airFb("aalink MCS source")); });
         pickInt(popup, "aalink Throughput %", cfg.throughputPct, 10, 100, 5,
-            v -> { cfg.throughputPct = v; saveApfpv(cfg); ssh.setAalink("THROUGHPUT_PCT", String.valueOf(v), (o,d)->{}); });
+            v -> { cfg.throughputPct = v; saveApfpv(cfg); ssh.setAalink("THROUGHPUT_PCT", String.valueOf(v), airFb("aalink Throughput %")); });
         // SCALE_TX_POWER: verified from greg10.2 aalink binary — the per-MCS PWR
         // table is multiplied by this value ONLY when it is < 1.0. Any value >= 1.0
         // is ignored (the code skips the multiply loop; no scale-up is possible).
@@ -1277,29 +1404,29 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         // commanded TX power index proportionally (peak PWR_EU 2800 x 0.74 = ~2072).
         pickDoubleEntry(popup, "aalink TX power scale (0-1; <1.0 reduces power)",
             cfg.scaleTxPower, 0.0, 1.0,
-            v -> { cfg.scaleTxPower = v; saveApfpv(cfg); ssh.setAalink("SCALE_TX_POWER", String.valueOf(v), (o,d)->{}); });
+            v -> { cfg.scaleTxPower = v; saveApfpv(cfg); ssh.setAalink("SCALE_TX_POWER", String.valueOf(v), airFb("aalink TX power scale")); });
         pickInt(popup, "aalink Threshold shift", cfg.threshShift, -10, 10, 1,
-            v -> { cfg.threshShift = v; saveApfpv(cfg); ssh.setAalink("THRESH_SHIFT", String.valueOf(v), (o,d)->{}); });
+            v -> { cfg.threshShift = v; saveApfpv(cfg); ssh.setAalink("THRESH_SHIFT", String.valueOf(v), airFb("aalink Threshold shift")); });
         pickInt(popup, "aalink High temp", cfg.highTemp, 70, 110, 5,
-            v -> { cfg.highTemp = v; saveApfpv(cfg); ssh.setAalink("HIGH_TEMP", String.valueOf(v), (o,d)->{}); });
+            v -> { cfg.highTemp = v; saveApfpv(cfg); ssh.setAalink("HIGH_TEMP", String.valueOf(v), airFb("aalink High temp")); });
         pickDouble(popup, "aalink OSD scale", cfg.osdScale, new double[]{0.5,0.8,1.0,1.2,1.5},
-            v -> { cfg.osdScale = v; saveApfpv(cfg); ssh.setAalink("OSD_SCALE", String.valueOf(v), (o,d)->{}); });
+            v -> { cfg.osdScale = v; saveApfpv(cfg); ssh.setAalink("OSD_SCALE", String.valueOf(v), airFb("aalink OSD scale")); });
         pickInt(popup, "aalink channel", cfg.aalinkChannel, 36, 48, 4,
-            v -> { cfg.aalinkChannel = v; saveApfpv(cfg); ssh.setAalink("channel", String.valueOf(v), (o,d)->{}); });
+            v -> { cfg.aalinkChannel = v; saveApfpv(cfg); ssh.setAalink("channel", String.valueOf(v), airFb("aalink channel")); });
 
         // air camera — each its own top-level submenu
         com.openipc.pixelpilot.apfpv.AirCameraSettings c = new com.openipc.pixelpilot.apfpv.AirCameraSettings();
         pickFromList(popup, "Cam Resolution", c.size, com.openipc.pixelpilot.apfpv.AirCameraSettings.SIZES,
-            v -> ssh.setSize(v,(o,d)->{}));
+            v -> ssh.setSize(v,airFb("Cam Resolution")));
         pickFromList(popup, "Cam FPS", String.valueOf(c.fps), com.openipc.pixelpilot.apfpv.AirCameraSettings.FPS,
-            v -> ssh.setFps(Integer.parseInt(v),(o,d)->{}));
+            v -> ssh.setFps(Integer.parseInt(v),airFb("Cam FPS")));
         pickFromList(popup, "Cam Codec", c.codec, com.openipc.pixelpilot.apfpv.AirCameraSettings.CODECS,
-            v -> ssh.setCodec(v,(o,d)->{}));
-        pickInt(popup, "Cam Bitrate kbps", c.bitrateKbps, 1024, 30720, 1024, v -> ssh.setBitrate(v,(o,d)->{}));
-        pickInt(popup, "Cam GOP", c.gopSize, 0, 10, 1, v -> ssh.setGop(v,(o,d)->{}));
-        pickInt(popup, "Cam Contrast", c.contrast, 0, 100, 10, v -> ssh.setContrast(v,(o,d)->{}));
-        pickInt(popup, "Cam Saturation", c.saturation, 0, 100, 10, v -> ssh.setSaturation(v,(o,d)->{}));
-        pickInt(popup, "Cam Luminance", c.luminance, 0, 100, 10, v -> ssh.setLuminance(v,(o,d)->{}));
+            v -> ssh.setCodec(v,airFb("Cam Codec")));
+        pickInt(popup, "Cam Bitrate kbps", c.bitrateKbps, 1024, 30720, 1024, v -> ssh.setBitrate(v,airFb("Cam Bitrate")));
+        pickInt(popup, "Cam GOP", c.gopSize, 0, 10, 1, v -> ssh.setGop(v,airFb("Cam GOP")));
+        pickInt(popup, "Cam Contrast", c.contrast, 0, 100, 10, v -> ssh.setContrast(v,airFb("Cam Contrast")));
+        pickInt(popup, "Cam Saturation", c.saturation, 0, 100, 10, v -> ssh.setSaturation(v,airFb("Cam Saturation")));
+        pickInt(popup, "Cam Luminance", c.luminance, 0, 100, 10, v -> ssh.setLuminance(v,airFb("Cam Luminance")));
 
         // presets — top-level submenu
         SubMenu pr = popup.getMenu().addSubMenu("APFPV presets");
@@ -1307,7 +1434,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         if (presets.list().isEmpty()) pr.add("(sync from OpenIPC/fpv-presets)").setEnabled(false);
         else for (com.openipc.pixelpilot.apfpv.AirPresets.Preset p : presets.list())
             pr.add(p.name).setOnMenuItemClickListener(i -> {
-                presets.apply(p, true, ssh, (o,d)->{}); return true; });
+                presets.apply(p, true, ssh, airFb("Preset")); return true; });
     }
 
     // ---- gs-style value pickers: ONE submenu per parameter, exactly like the
@@ -1706,7 +1833,15 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
     /**
      * Starts the native Mavlink service and posts an initial Runnable to the Handler.
      */
+    // Mavlink telemetry is DROPPED FOR NOW (user request 2026-07-15). Beyond removing the OSD
+    // telemetry, its native socket emits ~64 heartbeat/req UDP packets/sec to the VTX (:12345);
+    // over the dongle those become 64 synchronous bulk-OUT TX/sec that contend with the single
+    // libusb RX worker → periodic RX stalls (a stutter source on dongle mode, absent on phone-Wi-Fi).
+    // Flip MAVLINK_ENABLED back to true to restore.
+    private static final boolean MAVLINK_ENABLED = false;
+
     private void setupMavlink() {
+        if (!MAVLINK_ENABLED) { Log.i(TAG, "Mavlink disabled (MAVLINK_ENABLED=false)"); return; }
         MavlinkNative.nativeStart(this);
         handler.post(runnable);
     }
@@ -2044,6 +2179,13 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
                 // VPN permission not granted
                 Log.e(TAG, "VPN permission was not granted by the user.");
             }
+        } else if (requestCode == 101) {  // APFPV VTX-route VPN consent
+            if (resultCode == RESULT_OK) {
+                startService(new Intent(this, ApfpvVpnService.class));
+                Toast.makeText(this, "VTX route via dongle: ON", Toast.LENGTH_SHORT).show();
+            } else {
+                Log.e(TAG, "APFPV VTX-route VPN consent denied.");
+            }
         } else {
             Log.w(TAG, "onActivityResult: unknown request code " + requestCode);
         }
@@ -2244,7 +2386,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
 
     @Override
     protected void onStop() {
-        MavlinkNative.nativeStop(this);
+        if (MAVLINK_ENABLED) MavlinkNative.nativeStop(this);
         handler.removeCallbacks(runnable);
         unregisterReceivers();
         // All transports + video already stopped in onPause; don't double-disconnect

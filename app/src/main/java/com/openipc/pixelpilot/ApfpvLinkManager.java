@@ -45,6 +45,10 @@ public class ApfpvLinkManager {
     private String  staticIp    = "";        // "a.b.c.d" = bind that fixed IP (skip DHCP); "" = DHCP
 
     private final Map<String, UsbDevice> activeAdapters = new HashMap<>();
+    // The live dongle connection (its fd is adopted by the native station). Held open for the
+    // life of the link and CLOSED in stopAdapters() so a paused app releases the device — else
+    // the fd stays open, the device is busy, and the resume openDevice() fails -> no reconnect.
+    private android.hardware.usb.UsbDeviceConnection currentConn;
 
     public ApfpvLinkManager(Context context, ActivityVideoBinding binding, ApfpvStaLink staLink) {
         this.context = context;
@@ -62,6 +66,19 @@ public class ApfpvLinkManager {
                 if (s == StaState.STREAMING && wlx != null && connectingAdapterName != null) {
                     wlx.rememberConnected(connectingAdapterName);
                 }
+                // Auto-route VTX SSH/HTTP through the dongle once streaming, so menu settings
+                // work without manually enabling it each time. Only auto-starts if VPN consent
+                // was ALREADY granted (VpnService.prepare()==null) — the first time still needs
+                // the menu "VTX route via dongle → Enable" to show the one-time consent dialog.
+                if (s == StaState.STREAMING) {
+                    maybeStartVtxRoute();
+                    // NOTE: the old "push rtw_ampdu_enable=0 to the VTX" is REMOVED. It dates from
+                    // when the userspace dongle couldn't emit the compressed BlockAck, so A-MPDU-on
+                    // collapsed the link. The dongle now DOES A-MPDU (firmware-RA uplink → the AP
+                    // ramps to VHT-2SS/80MHz and aggregates; the HW auto-emits the compressed BA) —
+                    // disabling A-MPDU on the VTX would throw away that 2x+ throughput. So we leave
+                    // the VTX at its default (A-MPDU on) and let the link aggregate.
+                }
                 showState(s);
             }
             @Override public void onRssi(int dbm)            { showRssi(dbm); }
@@ -71,6 +88,31 @@ public class ApfpvLinkManager {
             }
         });
     }
+
+    /** Auto-start the dongle VTX route (ApfpvVpnService) on STREAMING — only if VPN consent is
+     *  already granted (else leave it to the menu, which shows the one-time consent dialog). */
+    private boolean vtxRoutePrompted = false;   // request VPN consent at most once per app run
+    private void maybeStartVtxRoute() {
+        try {
+            if (android.net.VpnService.prepare(context) == null) {   // null = already consented
+                context.startService(new android.content.Intent(context, ApfpvVpnService.class));
+            } else if (context instanceof VideoActivity && !vtxRoutePrompted) {
+                // Consent not yet granted. The system VPN dialog can only be shown from an Activity,
+                // so the old code silently no-op'd here and the dongle route (SSH + settings + LQ to
+                // 192.168.0.1) never came up on its own. Prompt ONCE on the first dongle STREAMING;
+                // after the user allows it, VpnService.prepare()==null and it auto-starts every time.
+                vtxRoutePrompted = true;
+                final VideoActivity act = (VideoActivity) context;
+                act.runOnUiThread(act::ensureVtxRouteConsent);
+            }
+        } catch (Exception ignored) {}
+    }
+
+    // REMOVED: maybeSetVtxAmpdu() / the rtw_ampdu_enable=0 push to the VTX. It existed because the
+    // userspace dongle couldn't emit the compressed BlockAck, so A-MPDU-on caused PN-replay loss.
+    // The dongle now does A-MPDU natively (firmware-RA uplink → AP ramps to VHT-2SS/80MHz + auto
+    // compressed-BA), so disabling it on the VTX only threw away throughput. The VTX stays at its
+    // default (A-MPDU on).
 
     public void setChannel(int ch)        { this.wifiChannel = ch; }
     public void setBandwidth(int bw)      { this.bandWidth = bw; }
@@ -102,7 +144,9 @@ public class ApfpvLinkManager {
         return startAdapter(a.device);
     }
     public synchronized void stopAdapters() {
-        if (staLink != null) staLink.disconnect();
+        if (staLink != null) staLink.disconnect();   // native teardown FIRST (stops threads using the fd)
+        // ...then release the fd so a resume can re-openDevice the dongle.
+        if (currentConn != null) { try { currentConn.close(); } catch (Exception ignored) {} currentConn = null; }
     }
 
     /** Open the first RTL8812AU dongle and run an all-SSID scan for the picker.
@@ -164,6 +208,38 @@ public class ApfpvLinkManager {
         showMessage("VRX beacon OFF");
     }
 
+    /** WIP: bring the dongle up AS a Wi-Fi AP (SoftAP) so a second device can associate. Opens the
+     *  dongle like startBeaconCal(); the HW software-beacon path (Jaguar1 ENSWBCN) is enabled when
+     *  the DEVOURER_AP_HWACK gate is on. pass "" = open AP. Runs off the UI thread (Init blocks). */
+    public synchronized boolean startDongleAp(String ssid, int channel, String pass) {
+        UsbManager mgr = (UsbManager) context.getSystemService(Context.USB_SERVICE);
+        if (mgr == null || staLink == null || staLink.handle() == 0L) return false;
+        UsbDevice dev = null;
+        for (UsbDevice d : mgr.getDeviceList().values())
+            if (d.getVendorId() == 0x0bda) { dev = d; break; }
+        if (dev == null) { showMessage("APFPV AP: no dongle"); return false; }
+        if (!mgr.hasPermission(dev)) {
+            requestPermission(mgr, dev);
+            showMessage("APFPV AP: allow USB access, then retry");
+            return false;
+        }
+        UsbDeviceConnection conn = mgr.openDevice(dev);
+        if (conn == null) { showMessage("APFPV AP: couldn't open dongle"); return false; }
+        int fd = conn.getFileDescriptor();
+        if (fd < 0) { conn.close(); return false; }
+        Telemetry.event("apfpv_start_ap", "ch", String.valueOf(channel), "sec", String.valueOf(pass != null && !pass.isEmpty()));
+        final int fdF = fd; final String ssidF = ssid, passF = pass; final int chF = channel;
+        new Thread(() -> staLink.startAp(fdF, ssidF, chF, passF), "apfpv-ap-start").start();
+        showMessage("APFPV AP starting: \"" + ssid + "\" ch" + channel
+                    + (pass != null && !pass.isEmpty() ? " WPA2" : " OPEN"));
+        return true;
+    }
+
+    public synchronized void stopDongleAp() {
+        if (staLink != null) staLink.stopAp();
+        showMessage("APFPV AP stopped");
+    }
+
     // --- mirrors WfbLinkManager.startAdapter, but credentialed + stateful ----
     // Every external precondition here can fail at runtime (no device, permission
     // not yet granted, the dongle still claimed by the WFB stack we just stopped,
@@ -196,6 +272,9 @@ public class ApfpvLinkManager {
             return false;
         }
 
+        // Release a prior connection (e.g. a reconnect without a stopAdapters in between)
+        // so we don't leak the fd / keep the device busy.
+        if (currentConn != null) { try { currentConn.close(); } catch (Exception ignored) {} currentConn = null; }
         // openDevice() returns null if the open races or the fd is still held by
         // the stack we just tore down — must not deref it for getFileDescriptor().
         UsbDeviceConnection conn = mgr.openDevice(dev);
@@ -221,6 +300,11 @@ public class ApfpvLinkManager {
             return false;
         }
 
+        // Hold the connection open for the life of the link (native adopts its fd on a worker
+        // thread); stopAdapters() closes it. A local would be GC-finalized -> fd closed under
+        // the native RX -> errors. This is also what lets a resume cleanly re-open the device.
+        currentConn = conn;
+
         showMessage("APFPV: connecting to \"" + ssid + "\"…");   // channel follows the AP (discovery)
 
         // Flow event + Crashlytics keys so a crash in the native chain below is
@@ -244,13 +328,23 @@ public class ApfpvLinkManager {
             if (wm != null) {
                 try { wm.startScan(); } catch (Exception ignored) {}   // ask for a fresh sweep
                 long nowUs = android.os.SystemClock.elapsedRealtime() * 1000L;
+                String staleBssid = ""; int staleCh = 0;   // best-effort match if no fresh one exists
                 for (android.net.wifi.ScanResult r : wm.getScanResults()) {
                     if (!ssid.equals(r.SSID)) continue;
                     long ageMs = (nowUs - r.timestamp) / 1000L;
-                    // Only trust a FRESH result (<20 s). A stale cache (we've seen 6-day-
-                    // old entries) gives a wrong channel -> we arm off-channel -> TXFAIL.
-                    if (ageMs >= 0 && ageMs < 20000) { bssid = r.BSSID; resolvedCh = freqToChannel(r.frequency); }
-                    break;
+                    // Prefer a FRESH result (<20 s) — its channel is guaranteed current.
+                    if (ageMs >= 0 && ageMs < 20000) { bssid = r.BSSID; resolvedCh = freqToChannel(r.frequency); break; }
+                    // Otherwise remember it. Android throttles app-initiated scans (startScan is
+                    // often ignored), so the cache can be minutes/days old and NEVER < 20 s — which
+                    // left bssid empty and dropped us into the flaky native sweep that misses ch36.
+                    // A VTX AP is stationary, so a stale BSSID/channel is still CORRECT; arming to it
+                    // directly beats sweeping. Keep the newest (smallest-age) stale match.
+                    if (staleBssid.isEmpty()) { staleBssid = r.BSSID; staleCh = freqToChannel(r.frequency); }
+                }
+                if (bssid.isEmpty() && !staleBssid.isEmpty()) {
+                    bssid = staleBssid; resolvedCh = staleCh;
+                    android.util.Log.i("ApfpvLink", "phone-assist: using STALE scan match "
+                            + bssid + " ch" + resolvedCh + " (startScan throttled; VTX is stationary)");
                 }
                 // Fallback for a FAST RE-INSERT (no fresh scan yet -> native sweep misses ->
                 // FAIL_NO_AP "not in range"): the phone ITSELF is associated to the AP, so arm
@@ -282,7 +376,10 @@ public class ApfpvLinkManager {
         new Thread(() -> {
             // State callbacks drive the UI; STREAMING => video on 5600.
             ApfpvStaLink.nativeStaConnect(handle, staLink, fdF, chF, bwF, ssidF, passF, bssidF, staticIpF);
-            // Turn on dongle-RSSI -> VTX:12345 feedback (better than stock phone-APFPV)
+            // Turn on dongle-RSSI -> VTX:12345 feedback (better than stock phone-APFPV). Feeds the
+            // VTX aalink so it holds a stable downlink rate. (Tested disabled 2026-07-15 to rule it
+            // out as the freeze cause — it wasn't — so re-enabled. It HELPS the "downlink rate drops
+            // to ~9 → stutter" pattern by giving the VTX rate controller our link-quality feedback.)
             ApfpvStaLink.nativeStaSetLqFeedback(handle, true);
         }, "apfpv-connect").start();
         return true;
@@ -300,8 +397,11 @@ public class ApfpvLinkManager {
     private void requestPermission(UsbManager mgr, UsbDevice dev) {
         int flags = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
                 ? PendingIntent.FLAG_MUTABLE : 0;
-        PendingIntent pi = PendingIntent.getBroadcast(
-                context, 0, new Intent(ACTION_USB_PERMISSION), flags);
+        // Android 14 (UDC) blocks a MUTABLE PendingIntent carrying an IMPLICIT intent
+        // (RemoteException in getIntentSenderWithFeatureAsApp -> app crash). Make it
+        // explicit by targeting our own package.
+        Intent usbIntent = new Intent(ACTION_USB_PERMISSION).setPackage(context.getPackageName());
+        PendingIntent pi = PendingIntent.getBroadcast(context, 0, usbIntent, flags);
         mgr.requestPermission(dev, pi);
     }
 

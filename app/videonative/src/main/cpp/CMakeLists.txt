@@ -29,3 +29,9 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
 
 set_property(TARGET ${CMAKE_PROJECT_NAME} PROPERTY CXX_STANDARD 20)
 target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE -fno-omit-frame-pointer)
+
+# Strip assert() from this library. It parses adversarial network input (RTP/NALU) on a single
+# thread; upstream's assert()s (ParseRTP, NALU.hpp, RTP.hpp) fire on torn/lossy packets — routine
+# on the dongle link — and abort() the whole app. Release builds define NDEBUG to strip them; a
+# debug build does not, so force it here. The explicit bounds/null guards in the code stay active.
+target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE NDEBUG)

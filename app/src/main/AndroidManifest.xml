@@ -41,6 +41,18 @@
             </intent-filter>
         </service>
 
+        <!-- Routes VTX (192.168.0.1) TCP/UDP through the USB dongle so menu SSH works on the
+             dongle path (not just phone-Wi-Fi). See ApfpvVpnService. -->
+        <service
+            android:name=".ApfpvVpnService"
+            android:label="APFPV VTX route"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+        </service>
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.provider"
