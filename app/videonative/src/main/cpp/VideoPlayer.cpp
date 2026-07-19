@@ -57,6 +57,7 @@ struct GlDvrW
     mp4_h26x_writer_t wr{};
     int               fps      = 30;
     bool              wrInited = false;
+    int64_t           ptsBase  = -1;   // first frame's PTS (us); deltas become the 90kHz sample TS
 };
 }  // namespace
 extern "C" void* glfanout_dvr_start(int fd, int w, int h, int fps, int fmp4, int h265)
@@ -78,16 +79,26 @@ extern "C" void* glfanout_dvr_start(int fd, int w, int h, int fps, int fmp4, int
     d->wrInited = true;
     return d;
 }
-extern "C" void glfanout_dvr_write(void* dvr, const uint8_t* data, size_t size)
+extern "C" void glfanout_dvr_write(void* dvr, const uint8_t* data, size_t size, int64_t ptsUs)
 {
     auto* d = reinterpret_cast<GlDvrW*>(dvr);
     static int cnt = 0;
-    if (cnt < 6) __android_log_print(ANDROID_LOG_DEBUG, "GLFanoutDbg", "dvr_write #%d sz=%zu d=%p", cnt, size, (void*) d);
+    if (cnt < 6) __android_log_print(ANDROID_LOG_DEBUG, "GLFanoutDbg", "dvr_write #%d sz=%zu d=%p pts=%lld", cnt, size, (void*) d, (long long) ptsUs);
     cnt++;
     if (d && d->wrInited)
     {
-        int r = mp4_h26x_write_nal(&d->wr, data, size, 90000 / (d->fps > 0 ? d->fps : 30));
-        if (cnt < 6) __android_log_print(ANDROID_LOG_DEBUG, "GLFanoutDbg", "  write_nal r=%d", r);
+        // Use the encoder's REAL presentation timestamp (seeded from the monotonic clock via
+        // eglPresentationTimeANDROID) so the 90kHz sample timestamp tracks wall-clock. A fixed
+        // 90000/fps cadence drifts whenever the actual decode rate != configured fps, which makes
+        // a long recording play progressively slower. Delta from the first frame's PTS (in 90kHz
+        // units) is the correct, fps-independent sample time.
+        unsigned ts90k;
+        if (d->ptsBase < 0) d->ptsBase = ptsUs;
+        long long deltaUs = (long long) ptsUs - d->ptsBase;
+        if (deltaUs < 0) deltaUs = 0;
+        ts90k = (unsigned) ((deltaUs * 90) / 1000);
+        int r = mp4_h26x_write_nal(&d->wr, data, size, ts90k);
+        if (cnt < 6) __android_log_print(ANDROID_LOG_DEBUG, "GLFanoutDbg", "  write_nal r=%d ts90k=%u", r, ts90k);
     }
 }
 extern "C" void glfanout_dvr_stop(void* dvr)
@@ -106,6 +117,8 @@ void VideoPlayer::processQueue()
     MP4E_mux_t*       mux  = MP4E_open(0 /*sequential_mode*/, dvr_mp4_fragmentation, fout, write_callback);
     mp4_h26x_writer_t mp4wr;
     float             framerate = 0;
+    bool              firstNalu = true;
+    std::chrono::steady_clock::time_point tsBase;  // first frame's creationTime; deltas -> 90kHz sample TS
     if (mux == nullptr)
     {
         __android_log_print(ANDROID_LOG_ERROR, TAG, "dvr open failed");
@@ -149,8 +162,17 @@ void VideoPlayer::processQueue()
             }
             naluQueue.pop();
             lock.unlock();
+            // Sample timestamp from the NALU's real creation time (steady_clock), NOT a fixed
+            // 90000/framerate cadence. A fixed cadence drifts whenever the actual decode rate !=
+            // configured fps, so a long recording plays progressively slower. Delta from the first
+            // frame in 90kHz units tracks wall-clock exactly, at any source fps (60/90/120).
+            if (firstNalu) { tsBase = nalu.creationTime; firstNalu = false; }
+            long long deltaUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                                   nalu.creationTime - tsBase).count();
+            if (deltaUs < 0) deltaUs = 0;
+            unsigned ts90k = (unsigned) ((deltaUs * 90) / 1000);
             // Process the NALU
-            auto res = mp4_h26x_write_nal(&mp4wr, nalu.getData(), nalu.getSize(), 90000 / framerate);
+            auto res = mp4_h26x_write_nal(&mp4wr, nalu.getData(), nalu.getSize(), ts90k);
             if (MP4E_STATUS_OK != res)
             {
                 __android_log_print(ANDROID_LOG_DEBUG, TAG, "mp4_h26x_write_nal failed with %d", res);

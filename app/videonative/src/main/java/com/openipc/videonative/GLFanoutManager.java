@@ -38,35 +38,36 @@ public class GLFanoutManager implements SurfaceTexture.OnFrameAvailableListener 
     private final float[]  texMatrix = new float[16];
     private HandlerThread  glThread;
     private Handler        glHandler;
-    private final java.util.concurrent.atomic.AtomicInteger pendingFrames = new java.util.concurrent.atomic.AtomicInteger(0);
-    private final Runnable renderTask = new Runnable() {
-        @Override
-        public void run() {
-            if (nativeHandle == 0 || surfaceTexture == null) return;
-            // Drain ALL pending frames, render only the freshest (FPV skip-to-latest).
-            // updateTexImage blocks until a frame is available; each call consumes one.
-            // The pendingFrames counter tells us how many onFrameAvailable callbacks
-            // fired before this task ran — drain exactly that many.
-            // Claim ALL pending frames AND reset the counter to 0 atomically. Critical:
-            // onFrameAvailable only re-posts renderTask on the 0->1 edge, so the counter
-            // MUST return to 0 every pass or the gate never re-arms. The old code
-            // decremented per successful updateTexImage and `break` on exception left the
-            // counter stuck >0 forever -> renderTask never posted again -> SurfaceTexture
-            // buffer queue fills -> decoder blocks -> that eye freezes permanently (the
-            // "worked then froze" VR symptom). getAndSet(0) re-arms the gate regardless.
-            int toDrain = pendingFrames.getAndSet(0);
-            while (toDrain > 0) {
-                try {
-                    surfaceTexture.updateTexImage();
-                } catch (Exception e) {
-                    break; // counter already reset; the next frame re-posts renderTask
-                }
-                toDrain--;
-            }
+    // Render throttle: the display refreshes at 60Hz (16.67ms). Rendering faster fills
+    // the BLAST buffer queue → NO_BUFFER_AVAILABLE → renderFps collapses to 0 after ~30s.
+    // updateTexImage() drains every frame (releases SurfaceTexture buffers so the decoder
+    // never blocks), but eglSwapBuffers is called at most once per display refresh.
+    // Display throttle: eglSwapBuffers on the display is rate-limited to ~60fps so BLAST buffers
+    // don't exhaust. But the DVR ENCODER must still receive every frame at the decode rate —
+    // otherwise its timestamps drift (encoder configured for 90fps, only gets 60fps → recording
+    // plays progressively slower, the "recording fps is wrong the longer the video" bug).
+    // nativeRenderFrameSkipDisplay runs the encode pass (eglSwapBuffers on encoder surface) but
+    // SKIPS eglSwapBuffers on the display surface — so the encoder stays in sync with the source
+    // while the display self-regulates at its own refresh rate.
+    private long lastDisplayNs = 0;
+    private static final long DISPLAY_INTERVAL_NS = 16_666_667L; // 60fps display cap
+
+    @Override
+    public void onFrameAvailable(SurfaceTexture st) {
+        if (nativeHandle == 0 || surfaceTexture == null) return;
+        try {
+            surfaceTexture.updateTexImage();   // always drain to release decoder buffers
             surfaceTexture.getTransformMatrix(texMatrix);
-            nativeRenderFrame(nativeHandle, texMatrix);
-        }
-    };
+            long now = System.nanoTime();
+            if (now - lastDisplayNs < DISPLAY_INTERVAL_NS) {
+                // Encode-only: feed the DVR at full rate, don't swap to display
+                nativeRenderFrameEncodeOnly(nativeHandle, texMatrix);
+            } else {
+                lastDisplayNs = now;
+                nativeRenderFrame(nativeHandle, texMatrix);
+            }
+        } catch (Exception e) { /* SurfaceTexture released — ignore */ }
+    }
 
     /** Create the GL thread + EGL context bound to the display, build the SurfaceTexture the
      *  decoder will render into. Blocks until set up. @return true on success. */
@@ -81,7 +82,7 @@ public class GLFanoutManager implements SurfaceTexture.OnFrameAvailableListener 
             if (nativeHandle != 0) {
                 int texId = nativeOesTexture(nativeHandle);
                 surfaceTexture = new SurfaceTexture(texId);
-                // deliver onFrameAvailable to the GL thread so render runs where the ctx lives
+                // onFrameAvailable fires on glHandler thread — render DIRECTLY, no post()
                 surfaceTexture.setOnFrameAvailableListener(this, glHandler);
                 inputSurface = new Surface(surfaceTexture);
                 ok[0] = true;
@@ -154,18 +155,6 @@ public class GLFanoutManager implements SurfaceTexture.OnFrameAvailableListener 
         if (glHandler != null) glHandler.post(() -> { if (nativeHandle != 0) nativeStopDvrRaw(nativeHandle); });
     }
 
-    @Override
-    public void onFrameAvailable(SurfaceTexture st) {   // runs on the GL thread (glHandler)
-        // Coalesce: N onFrameAvailable callbacks → 1 render of the newest frame.
-        // Each callback increments the counter; only the first posts renderTask.
-        // renderTask drains all pending frames and renders only the last → no
-        // SurfaceTexture FIFO backlog → display stays real-time regardless of
-        // source rate (120, 60, etc.).
-        if (pendingFrames.incrementAndGet() == 1) {
-            glHandler.post(renderTask);
-        }
-    }
-
     public void release() {
         if (glHandler != null) {
             glHandler.post(() -> {
@@ -189,6 +178,7 @@ public class GLFanoutManager implements SurfaceTexture.OnFrameAvailableListener 
     private native void nativeSetRecordOsd(long handle, boolean on);
     private native void nativeUpdateOsd(long handle, Bitmap osd);
     private native void nativeRenderFrame(long handle, float[] texMatrix);
+    private native void nativeRenderFrameEncodeOnly(long handle, float[] texMatrix);
     private native void nativeRelease(long handle);
     private native void nativeStartDvr(long handle, int fd, int w, int h, int fps, int bitrate, boolean fmp4, boolean h265);
     private native void nativeStopDvr(long handle);

@@ -191,8 +191,10 @@ void VideoDecoder::configureStartDecoder(int idx)
             decoder.codec[idx] = (sw != nullptr) ? sw : AMediaCodec_createDecoderByType(MIME.c_str());
             // The SW HEVC decoder's output is always >60ms old, so the flush-to-keyframe path would
             // fire every frame -> renderFps=0 (black/freeze) + a flush storm. Disable it; drop-to-
-            // freshest still caps latency.
+            // freshest still caps latency. STICKY so onResume's setVideoFlushMs(UI default 60) can't
+            // re-arm it (that clobber was the ~7s renderFps=0 freezes on the dongle path).
             mFlushThresholdMs = 0;
+            mFlushForceDisabled = true;
         }
         else if (hwHevc[0] == '1')
         {
@@ -219,9 +221,17 @@ void VideoDecoder::configureStartDecoder(int idx)
     {
         char gate[PROP_VALUE_MAX] = {0};
         char plat[PROP_VALUE_MAX] = {0};
+        char dstale[PROP_VALUE_MAX] = {0};
         __system_property_get("debug.pixelpilot.mtkopt", gate);
         __system_property_get("ro.board.platform", plat);
+        __system_property_get("debug.pixelpilot.dropstale", dstale);
         mLowLatencyOpt   = (gate[0] != '0');                       // default ON (lag priority); opt-out: setprop ... 0
+        // Drop-to-freshest frame skipping: DEFAULT OFF. On the DONGLE's bursty delivery the decoder
+        // emits frames in bursts; this logic dropped them WITHOUT rendering (releaseOutputBuffer
+        // render=false) -> renderFps=0 while outputFps=120 = the multi-second dongle freeze (verified:
+        // ON -> periodic renderFps=0; OFF -> rock-solid 120fps). The low-latency decode keys below
+        // stay on; only the frame-DROP is gated. Opt-in debug.pixelpilot.dropstale=1.
+        mDropStale       = (dstale[0] == '1');
         mIsMtk           = std::string(plat).rfind("mt", 0) == 0;
         const bool isMtk = mIsMtk;
         if (mLowLatencyOpt)
@@ -426,7 +436,7 @@ void VideoDecoder::checkOutputLoop(int idx)
             // rendering and jump to the latest. No keyframe flush => fps does not collapse and the
             // picture stays live. On a clean link (phone-wifi) nothing newer is waiting, so every
             // frame still renders normally.
-            if (mLowLatencyOpt && idx == 0)
+            if (mDropStale && idx == 0)
             {
                 AMediaCodecBufferInfo ni;
                 ssize_t               nextIdx;

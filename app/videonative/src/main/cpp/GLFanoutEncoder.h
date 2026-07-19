@@ -24,7 +24,13 @@
 class GLFanoutEncoder
 {
   public:
-    using OnEncodedNalu = std::function<void(const uint8_t* data, size_t size, bool isH265)>;
+    // onEncoded(data, size, isH265, ptsUs): ptsUs is the encoder's presentation timestamp
+    // in microseconds (from AMediaCodecBufferInfo.presentationTimeUs). This is the REAL frame
+    // time (seeded by eglPresentationTimeANDROID in GLFanoutRenderer::encodePass), so the mp4
+    // writer can use it to compute 90kHz sample timestamps that track wall-clock — instead of a
+    // fixed 90000/fps cadence that drifts when the actual decode rate != configured fps (the
+    // "recording plays slower the longer it runs" bug).
+    using OnEncodedNalu = std::function<void(const uint8_t* data, size_t size, bool isH265, int64_t ptsUs)>;
 
     GLFanoutEncoder() = default;
     ~GLFanoutEncoder() { stop(); }
@@ -82,7 +88,7 @@ class GLFanoutEncoder
             if (eo < 0) continue;
             size_t   sz  = 0;
             uint8_t* out = AMediaCodec_getOutputBuffer(enc_, eo, &sz);
-            if (out && info.size > 0 && onEncoded_) onEncoded_(out + info.offset, info.size, h265_);
+            if (out && info.size > 0 && onEncoded_) onEncoded_(out + info.offset, info.size, h265_, info.presentationTimeUs);
             bool eos = (info.flags & AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM) != 0;
             AMediaCodec_releaseOutputBuffer(enc_, eo, false);
             if (eos) break;

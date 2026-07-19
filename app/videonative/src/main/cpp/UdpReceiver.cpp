@@ -49,8 +49,10 @@ void UDPReceiver::startReceiving()
 {
     receiving          = true;
     mUDPReceiverThread = std::make_unique<std::thread>([this] { this->receiveFromUDPLoop(); });
+    mDispatchThread    = std::make_unique<std::thread>([this] { this->dispatchLoop(); });
 #ifdef __ANDROID__
     NDKThreadHelper::setName(mUDPReceiverThread->native_handle(), mName.c_str());
+    NDKThreadHelper::setName(mDispatchThread->native_handle(), (mName + "Disp").c_str());
 #endif
 }
 
@@ -64,6 +66,44 @@ void UDPReceiver::stopReceiving()
         mUDPReceiverThread->join();
     }
     mUDPReceiverThread.reset();
+    mQueueCv.notify_all();
+    if (mDispatchThread && mDispatchThread->joinable())
+    {
+        mDispatchThread->join();
+    }
+    mDispatchThread.reset();
+    {
+        std::lock_guard<std::mutex> lk(mQueueMutex);
+        mQueue.clear();
+    }
+}
+
+// Drains the packet queue into the consumer (RTP parse -> decoder feed). This is the ONLY
+// place onDataReceivedCallback runs — its multi-ms decoder stalls no longer block recvfrom.
+void UDPReceiver::dispatchLoop()
+{
+#ifdef __ANDROID__
+    if (javaVm != nullptr)
+    {
+        NDKThreadHelper::setProcessThreadPriorityAttachDetach(javaVm, mCPUPriority, (mName + "Disp").c_str());
+    }
+#endif
+    std::vector<uint8_t> pkt;
+    while (true)
+    {
+        {
+            std::unique_lock<std::mutex> lk(mQueueMutex);
+            mQueueCv.wait(lk, [this] { return !mQueue.empty() || !receiving; });
+            if (mQueue.empty())
+            {
+                if (!receiving) break;
+                continue;
+            }
+            pkt = std::move(mQueue.front());
+            mQueue.pop_front();
+        }
+        onDataReceivedCallback(pkt.data(), pkt.size());
+    }
 }
 
 void UDPReceiver::receiveFromUDPLoop()
@@ -131,7 +171,17 @@ void UDPReceiver::receiveFromUDPLoop()
         // ssize_t message_length = recv(mSocket, buff, (size_t) mBuffsize, MSG_WAITALL);
         if (message_length > 0)
         {  // else -1 was returned;timeout/No data received
-            onDataReceivedCallback(buff->data(), (size_t) message_length);
+            // Enqueue for the dispatch thread — NEVER run the (decoder-blocking) consumer here.
+            {
+                std::lock_guard<std::mutex> lk(mQueueMutex);
+                if (mQueue.size() >= QUEUE_MAX_PACKETS)
+                {
+                    mQueue.pop_front();  // overflow: drop oldest (decoder is wedged anyway)
+                    nQueueDrops++;
+                }
+                mQueue.emplace_back(buff->data(), buff->data() + message_length);
+            }
+            mQueueCv.notify_one();
 
             nReceivedBytes += message_length;
             // The source ip stuff

@@ -160,6 +160,17 @@ class GLFanoutRenderer
         encodePass(encSurfRaw_, false,             texMatrix);  // secondary stream: Raw+OSD's clean file
     }
 
+    // Encode-only: feeds the DVR encoder at the full decode FPS (90/120) but SKIPS the display
+    // eglSwapBuffers. The display render is throttled so BLAST doesn't exhaust; this keeps the
+    // encoder receiving every frame so its timestamps stay in sync with the real cadence (no
+    // progressive slowdown).
+    void renderFrameEncodeOnly(const float texMatrix[16])
+    {
+        if (!ready_.load()) return;
+        encodePass(encSurf_,    recordOsd_.load(), texMatrix);
+        encodePass(encSurfRaw_, false,             texMatrix);
+    }
+
     // One encoder pass: render the frame (+ OSD when withOsd) into a MediaCodec input EGL surface.
     void encodePass(EGLSurface surf, bool withOsd, const float texMatrix[16])
     {

@@ -92,7 +92,10 @@ class VideoDecoder
     void interpretNALU(const NALU& nalu);
 
     // Set the MTK stale-frame flush threshold in ms (0 = off). Called from JNI when the menu changes.
-    void setFlushThresholdMs(int ms) { mFlushThresholdMs = ms < 0 ? 0 : ms; }
+    // If the decoder force-disabled flush (MTK SW-HEVC, whose inherent >60ms latency makes the
+    // flush-to-keyframe fire and collapse renderFps to 0), keep it OFF — the UI default (60ms) from
+    // onResume must NOT re-arm it. drop-to-freshest still caps latency without freezing.
+    void setFlushThresholdMs(int ms) { if (mFlushForceDisabled) { mFlushThresholdMs = 0; return; } mFlushThresholdMs = ms < 0 ? 0 : ms; }
 
   private:
     // Initialize decoder with SPS / PPS data from KeyFrameFinder
@@ -116,6 +119,7 @@ class VideoDecoder
     // gate `persist.pixelpilot.mtkopt` (default ON; `setprop ... 0` reverts to legacy for A/B).
     // When on, checkOutputLoop drops a stale backlog instead of rendering late frames.
     bool                         mLowLatencyOpt = false;
+    bool                         mDropStale = false;  // drop-to-freshest frame skipping (default OFF — froze the dongle)
     // MediaTek SoC? The stale-frame flush is MTK-only (the MTK HW decoder is the one that backs up
     // on a lossy link). Set from ro.board.platform in configureStartDecoder.
     bool                         mIsMtk = false;
@@ -124,6 +128,7 @@ class VideoDecoder
     // Default off so the baseline never drops frames; opt-in via the menu. Set from JNI via
     // setFlushThresholdMs(); plain int (benign 1-frame race on retune).
     int                          mFlushThresholdMs = 60;  // MTK-optimized: flush stale frames at 60ms
+    bool                         mFlushForceDisabled = false;  // sticky: MTK SW-HEVC disables flush-to-keyframe permanently (setFlushThresholdMs can't re-arm it)
     // Holds the AMediaCodec instance, as well as the state (configured or not configured)
     Decoder      decoder{};
     DecodingInfo decodingInfo;

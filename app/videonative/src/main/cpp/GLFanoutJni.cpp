@@ -14,7 +14,7 @@
 // every MP4E_* symbol at link). The fan-out encoder's NALUs (video, + OSD when recordOsd) flow
 // through these.
 extern "C" void* glfanout_dvr_start(int fd, int w, int h, int fps, int fmp4, int h265);
-extern "C" void  glfanout_dvr_write(void* dvr, const uint8_t* data, size_t size);
+extern "C" void  glfanout_dvr_write(void* dvr, const uint8_t* data, size_t size, int64_t ptsUs);
 extern "C" void  glfanout_dvr_stop(void* dvr);
 static void* g_glDvr    = nullptr;   // primary stream writer (Raw OR OSD)
 static void* g_glDvrRaw = nullptr;   // secondary clean writer (Raw+OSD mode)
@@ -76,6 +76,19 @@ Java_com_openipc_videonative_GLFanoutManager_nativeRenderFrame(JNIEnv* env, jobj
     R(h)->renderFrame(m);
 }
 
+// Encode-only: feeds the DVR encoder at the full decode rate (90/120fps) but SKIPS the
+// display eglSwapBuffers. When the render throttle drops display frames to prevent BLAST
+// exhaustion, this keeps the encoder timestamps in sync with the real frame cadence.
+// Without it the encoder gets fewer frames than its configured fps → timestamps drift →
+// recording plays progressively slower (the "recording fps wrong" bug).
+JNIEXPORT void JNICALL
+Java_com_openipc_videonative_GLFanoutManager_nativeRenderFrameEncodeOnly(JNIEnv* env, jobject, jlong h, jfloatArray jmat) {
+    if (!h || jmat == nullptr) return;
+    float m[16];
+    env->GetFloatArrayRegion(jmat, 0, 16, m);
+    R(h)->renderFrameEncodeOnly(m);
+}
+
 JNIEXPORT void JNICALL
 Java_com_openipc_videonative_GLFanoutManager_nativeRelease(JNIEnv*, jobject, jlong h) {
     if (h) delete R(h);
@@ -91,8 +104,8 @@ Java_com_openipc_videonative_GLFanoutManager_nativeStartDvr(
     // The cb runs on the encoder drain thread; the writer (g_glDvr) outlives it — stopDvr joins
     // the drain thread before glfanout_dvr_stop frees it.
     if (!R(h)->startDvr((int) w, (int) hh, (int) fps, (int) bitrate,
-                        [](const uint8_t* d, size_t s, bool) { glfanout_dvr_write(g_glDvr, d, s); },
-                        h265 == JNI_TRUE)) {
+                         [](const uint8_t* d, size_t s, bool, int64_t pts) { glfanout_dvr_write(g_glDvr, d, s, pts); },
+                         h265 == JNI_TRUE)) {
         glfanout_dvr_stop(g_glDvr); g_glDvr = nullptr;
     }
 }
@@ -111,7 +124,7 @@ Java_com_openipc_videonative_GLFanoutManager_nativeStartDvrRaw(
     g_glDvrRaw = glfanout_dvr_start((int) fd, (int) w, (int) hh, (int) fps, fmp4 == JNI_TRUE ? 1 : 0, 0);
     if (!g_glDvrRaw) return;
     if (!R(h)->startDvrRaw((int) w, (int) hh, (int) fps, (int) bitrate,
-                           [](const uint8_t* d, size_t s, bool) { glfanout_dvr_write(g_glDvrRaw, d, s); }, false)) {
+                            [](const uint8_t* d, size_t s, bool, int64_t pts) { glfanout_dvr_write(g_glDvrRaw, d, s, pts); }, false)) {
         glfanout_dvr_stop(g_glDvrRaw); g_glDvrRaw = nullptr;
     }
 }

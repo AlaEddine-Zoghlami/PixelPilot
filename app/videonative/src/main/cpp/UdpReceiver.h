@@ -10,9 +10,13 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <atomic>
+#include <condition_variable>
 #include <cstdio>
+#include <deque>
 #include <iostream>
+#include <mutex>
 #include <thread>
+#include <vector>
 // Starts a new thread that continuously checks for new data on UDP port
 
 class UDPReceiver
@@ -66,6 +70,7 @@ class UDPReceiver
 
   private:
     void receiveFromUDPLoop();
+    void dispatchLoop();
 
     const DATA_CALLBACK onDataReceivedCallback = nullptr;
     SOURCE_IP_CALLBACK  onSourceIP             = nullptr;
@@ -80,6 +85,18 @@ class UDPReceiver
     std::atomic<bool>            receiving      = false;
     std::atomic<long>            nReceivedBytes = 0;
     std::unique_ptr<std::thread> mUDPReceiverThread;
+    // RECEIVE/DECODE DECOUPLING: the receive thread must NEVER block on the consumer.
+    // The decoder feed (dequeueInputBuffer) stalls ~3.5ms per NALU; running it directly in
+    // the recvfrom loop let the socket buffer overflow on keyframe bursts (kernel snmp showed
+    // RcvbufErrors = 11% of InDatagrams = the stutter cycling). recvfrom now only copies the
+    // datagram into this queue; a dispatch thread drains it into onDataReceivedCallback.
+    // Bound ~11 MB (8192 * ~1.4KB) — if the decoder wedges that long, dropping is correct.
+    static constexpr size_t                  QUEUE_MAX_PACKETS = 8192;
+    std::deque<std::vector<uint8_t>>         mQueue;
+    std::mutex                               mQueueMutex;
+    std::condition_variable                  mQueueCv;
+    std::atomic<long>                        nQueueDrops{0};
+    std::unique_ptr<std::thread>             mDispatchThread;
     // https://en.wikipedia.org/wiki/User_Datagram_Protocol
     // 65,507 bytes (65,535 − 8 byte UDP header − 20 byte IP header).
     static constexpr const size_t UDP_PACKET_MAX_SIZE = 65507;

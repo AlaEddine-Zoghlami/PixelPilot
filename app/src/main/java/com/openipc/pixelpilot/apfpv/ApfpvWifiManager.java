@@ -7,6 +7,7 @@ import android.net.NetworkCapabilities;
 import android.net.NetworkRequest;
 import android.net.wifi.WifiManager;
 import android.net.wifi.WifiNetworkSpecifier;
+import android.net.wifi.WifiNetworkSuggestion;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
@@ -14,6 +15,8 @@ import android.os.Looper;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
+import java.util.Collections;
+import java.util.List;
 
 /**
  * ApfpvWifiManager — the THIRD link mode: APFPV over the PHONE'S OWN Wi-Fi chip,
@@ -64,7 +67,18 @@ public class ApfpvWifiManager {
     // UDP_PORT=12345). We are 192.168.0.10; the VTX (192.168.0.1) reads our RSSI.
     private static final String VTX_IP   = "192.168.0.1";
     private static final int    LQ_PORT  = 12345;
-    private static final int    LQ_PERIOD_MS = 100;
+    // 5 Hz is enough for the aalink rate-controller (was 100ms=10Hz — excessive UDP
+    // traffic competes with video RTP on the Wi-Fi link, degrading quality).
+    private static final int    LQ_PERIOD_MS = 200;
+
+    // WIFI POWER-SAVE KILLER: without a low-latency WifiLock, Android dozes the WiFi radio
+    // between beacons and batches RX — the stream halts for 1-2s periodically (inputFps=0
+    // dropouts) even though the AP keeps transmitting. FULL_LOW_LATENCY (API 29+) disables
+    // power save while held + app foreground; FULL_HIGH_PERF is the pre-29 fallback.
+    private WifiManager.WifiLock wifiLock;
+    // The OS-managed persistent network suggestion (replaces the transient local-only specifier
+    // that Android tore down every ~20-40s). Removed in stop().
+    private WifiNetworkSuggestion mSuggestion;
 
     private ConnectivityManager.NetworkCallback netCb;
     // Outstanding request that holds the no-internet Wi-Fi (VTX AP) UP so Android
@@ -95,9 +109,25 @@ public class ApfpvWifiManager {
      * WifiNetworkSpecifier (the modern, permissionless local-network path).
      * On success, bindProcessToNetwork pins sockets so video + SSH go over Wi-Fi.
      */
+    /** Hold a low-latency WifiLock for the whole session — kills WiFi power-save RX batching. */
+    private void acquireWifiLock() {
+        if (wifiLock != null && wifiLock.isHeld()) return;
+        try {
+            int mode = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+                    ? WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                    : WifiManager.WIFI_MODE_FULL_HIGH_PERF;
+            wifiLock = wifi.createWifiLock(mode, "PixelPilot:apfpv");
+            wifiLock.setReferenceCounted(false);
+            wifiLock.acquire();
+        } catch (Exception e) {
+            emitError("WifiLock: " + e.getMessage());
+        }
+    }
+
     public synchronized void start() {
         if (running) return;
         running = true;
+        acquireWifiLock();
         // If the phone is ALREADY on Wi-Fi (the bench/home AP, or the VTX AP joined
         // from system settings), do NOT force a new association — bind this process to
         // the current Wi-Fi so the RTP provider's stream reaches the existing :5600
@@ -124,48 +154,64 @@ public class ApfpvWifiManager {
             running = false;
             return;
         }
-        emitState("requesting Wi-Fi association to " + ssid);
-
-        WifiNetworkSpecifier spec = new WifiNetworkSpecifier.Builder()
-                .setSsid(ssid)
-                .setWpa2Passphrase(pass)
-                .build();
-
-        NetworkRequest req = new NetworkRequest.Builder()
-                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
-                // do NOT require INTERNET — greg's AP has no uplink
-                .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                .setNetworkSpecifier(spec)
-                .build();
-
+        // PERSISTENT path (the disconnect fix): a local-only WifiNetworkSpecifier is TRANSIENT by
+        // Android design — the OS tears it down every ~20-40s, and only ONE can exist per app so any
+        // re-request RESETS the factory and kills the live connection (the "wifi disconnect after
+        // time" + the request-id churn 70821→70824→70830). Instead SUGGEST the network: the OS
+        // auto-connects and MAINTAINS it like a saved network (no periodic teardown, no per-connect
+        // picker after the one-time "allow suggestions" approval). We OBSERVE via registerNetworkCallback
+        // (not requestNetwork) and bind when it comes up. Research: developer.android.com wifi-bootstrap
+        // + home-assistant/android#3961 — no API keeps a local-only specifier alive persistently.
+        emitState("suggesting " + ssid + " — the OS auto-connects and keeps it up");
+        try {
+            mSuggestion = new WifiNetworkSuggestion.Builder()
+                    .setSsid(ssid)
+                    .setWpa2Passphrase(pass)
+                    .setIsAppInteractionRequired(false)
+                    .build();
+            wifi.removeNetworkSuggestions(Collections.singletonList(mSuggestion));  // clear a stale copy
+            int rc = wifi.addNetworkSuggestions(Collections.singletonList(mSuggestion));
+            emitState("addNetworkSuggestions rc=" + rc
+                    + (rc == WifiManager.STATUS_NETWORK_SUGGESTIONS_SUCCESS ? " (ok — approve the one-time prompt)" : ""));
+        } catch (Exception e) {
+            emitError("addNetworkSuggestions failed: " + e.getMessage());
+        }
+        // Keep the no-internet AP from being reaped for cellular (same as the on-WiFi branch).
+        holdWifiNoInternet();
+        // OBSERVE Wi-Fi; bind + stream when the suggested APFPV network connects. onLost does NOT
+        // re-request (the OS auto-reconnects the suggestion) — that's what stops the self-teardown churn.
         netCb = new ConnectivityManager.NetworkCallback() {
             @Override public void onAvailable(Network network) {
+                NetworkCapabilities c = cm.getNetworkCapabilities(network);
+                if (c == null || !c.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return;
                 boundNetwork = network;
-                // Pin ALL sockets in this process (video UDP + SSH TCP) to Wi-Fi.
-                boolean ok = cm.bindProcessToNetwork(network);
-                emitState("Connected to " + ssid + (ok ? "" : " (bind failed)"));
-                // Phone-Wi-Fi APFPV has only the last two states: once associated,
-                // check whether THIS AP is an APFPV air unit. APFPV hands out
-                // 192.168.0.x with the VTX gateway at 192.168.0.1 — inspect routes.
+                cm.bindProcessToNetwork(network);
                 emitState(looksLikeApfpv(network)
-                        ? "APFPV found on " + ssid + " (VTX 192.168.0.1)"
-                        : "Connected to " + ssid + " — APFPV not found");
+                        ? "APFPV connected (VTX 192.168.0.1) — RTP on :5600"
+                        : "Wi-Fi connected — waiting for APFPV subnet");
                 maybeSetVtxAmpduOn(network);
                 startRssiLoop();
                 startLqLoop();
             }
-            @Override public void onUnavailable() {
-                emitError("could not join " + ssid + " (user denied or AP not found)");
-            }
             @Override public void onLost(Network network) {
-                emitError("lost association to " + ssid);
+                // OS-managed suggestion → it will auto-reconnect. Do NOT re-request (that caused the
+                // teardown churn). Just clear the process binding until onAvailable fires again.
+                if (boundNetwork != null && boundNetwork.equals(network)) {
+                    boundNetwork = null;
+                    try { cm.bindProcessToNetwork(null); } catch (Exception ignored) {}
+                }
+                emitState("Wi-Fi dropped — OS reconnecting the suggested network…");
             }
         };
+        NetworkRequest observe = new NetworkRequest.Builder()
+                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .build();
         try {
-            cm.requestNetwork(req, netCb);
+            cm.registerNetworkCallback(observe, netCb);
         } catch (Exception e) {
             running = false;
-            emitError("requestNetwork failed: " + e.getMessage());
+            emitError("registerNetworkCallback failed: " + e.getMessage());
         }
     }
 
@@ -224,6 +270,10 @@ public class ApfpvWifiManager {
     public synchronized void stop() {
         running = false;
         ampduPushed = false;   // re-push on the next association
+        if (wifiLock != null) {
+            try { if (wifiLock.isHeld()) wifiLock.release(); } catch (Exception ignored) {}
+            wifiLock = null;
+        }
         if (rssiThread != null) { rssiThread.interrupt(); rssiThread = null; }
         if (lqThread != null)   { lqThread.interrupt();   lqThread = null; }
         try { cm.bindProcessToNetwork(null); } catch (Exception ignored) {}
@@ -234,6 +284,10 @@ public class ApfpvWifiManager {
         if (holdCb != null) {
             try { cm.unregisterNetworkCallback(holdCb); } catch (Exception ignored) {}
             holdCb = null;
+        }
+        if (mSuggestion != null) {
+            try { wifi.removeNetworkSuggestions(Collections.singletonList(mSuggestion)); } catch (Exception ignored) {}
+            mSuggestion = null;
         }
         boundNetwork = null;
         emitState("stopped");
@@ -290,12 +344,12 @@ public class ApfpvWifiManager {
         rssiThread.start();
     }
 
-    // Send LQ feedback to the VTX exactly like the dongle LqFeedback path, but
-    // sourced from WifiManager RSSI. greg's aalink listens on 192.168.0.1:12345?
-    // No — aalink PINGs 192.168.0.10 (us) and reads RSSI sent back to it; the GS
-    // sends a small datagram with the signal percentage. We mirror that: convert
-    // dBm -> percent with the SAME formula the OpenIPC GS uses (2*(dBm+100),
-    // clamped 0..100) and send it to the VTX's LQ port.
+    // Send LQ feedback to the VTX. greg's aalink listens on UDP 192.168.0.1:12345
+    // and expects a bare RSSI percentage (0-100) — confirmed by the native LqFeedback.cpp
+    // which sends BOTH "gs_string=..." and bare "%d". The gs_string format may NOT parse
+    // on the current aalink binary ("confirmed to move the VTX downlink %" per LqFeedback).
+    // Send ONLY the bare percentage — it's the format known to work.
+    // Rate: 5 Hz (was 10 Hz) — less UDP competing with video RTP on the Wi-Fi link.
     private void startLqLoop() {
         lqThread = new Thread(() -> {
             DatagramSocket sock = null;

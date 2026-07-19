@@ -655,10 +655,11 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         // VR submenu
         setupVRSubMenu(popup);
 
-        // Channel + Bandwidth submenus REMOVED: the APFPV station now resolves band/channel
-        // (via scan) and bandwidth (from the AP's HT/VHT operation IEs) AUTOMATICALLY at connect
-        // time — matching what the AP actually provides — so manual channel/width selection is
-        // obsolete and only served to mis-set a fixed 20MHz that capped throughput.
+        // Channel submenu — picks the primary 20 MHz channel the dongle arms to
+        setupChannelSubMenu(popup);
+
+        // Bandwidth submenu — 20/40/80 MHz (must match the VTX's actual operating width)
+        setupBandwidthSubMenu(popup);
 
         // OSD submenu
         setupOSDSubMenu(popup);
@@ -1192,7 +1193,23 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         m.add("APFPV (dongle station)").setOnMenuItemClickListener(i -> {
             setLinkMode(LinkModeCoordinator.Mode.APFPV); return true; });
         m.add("APFPV (phone Wi-Fi, no dongle)").setOnMenuItemClickListener(i -> {
-            setLinkMode(LinkModeCoordinator.Mode.APFPV_WIFI); return true; });
+            // If ALREADY in phone-Wi-Fi mode, switchTo() no-ops ("already in mode") and never
+            // re-fires apfpvWifiManager.start() — so the local-only WifiNetworkSpecifier connect
+            // dialog never re-appears. Force a reconnect so selecting the item ALWAYS (re)triggers
+            // the "Connect to OpenIPC?" picker (the local-only path that avoids the saved-network
+            // roaming scans = the phone-Wi-Fi stutter). Otherwise do a normal mode switch.
+            if (linkMode == LinkModeCoordinator.Mode.APFPV_WIFI) {
+                SharedPreferences pp = getSharedPreferences("pixelpilot", MODE_PRIVATE);
+                String ssid = pp.getString("apfpv_ssid", "OpenIPC");
+                String pass = pp.getString("apfpv_pass", "12345678");
+                Toast.makeText(this, "Reconnecting phone Wi-Fi — tap Connect on the dialog", Toast.LENGTH_SHORT).show();
+                linkModeCoordinator.reconnectCurrent(ssid, pass, (mm, ok, d) -> runOnUiThread(() ->
+                    Toast.makeText(this, "phone Wi-Fi — " + d, Toast.LENGTH_SHORT).show()));
+            } else {
+                setLinkMode(LinkModeCoordinator.Mode.APFPV_WIFI);
+            }
+            return true;
+        });
     }
 
     /**
@@ -2459,9 +2476,19 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         SharedPreferences.Editor editor = prefs.edit();
         editor.putInt("wifi-channel", channel);
         editor.apply();
+        // WFB-ng mode: restart adapters on the new channel
         wfbLinkManager.stopAdapters();
         wfbLinkManager.setChannel(channel);
         wfbLinkManager.startAdapters();
+        // APFPV station mode: persist + reconnect on the new channel
+        if (apfpvMode) {
+            SharedPreferences pp = getSharedPreferences("pixelpilot", MODE_PRIVATE);
+            pp.edit().putInt("apfpv_channel", channel).apply();
+            String ssid = pp.getString("apfpv_ssid", "OpenIPC");
+            String pass = pp.getString("apfpv_pass", "12345678");
+            linkModeCoordinator.reconnectCurrent(ssid, pass, (m, ok, d) -> runOnUiThread(() ->
+                Toast.makeText(this, "Channel " + channel + " — " + d, Toast.LENGTH_SHORT).show()));
+        }
     }
 
     @Override
