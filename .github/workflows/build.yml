@@ -13,6 +13,10 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      ANDROID_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
+      KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+      KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -26,19 +30,26 @@ jobs:
           distribution: 'temurin'
           cache: gradle
 
-      # Signing is intentionally dropped for now: build the DEBUG APK, which is
-      # signed with the auto-generated debug key (installable, no secrets needed),
-      # so CI is green without a keystore. To restore signed release builds:
-      #   1. re-add `environment: ANDROID_KEYSTORE` to this job
-      #   2. set the ANDROID_KEYSTORE (base64 of a valid .jks, alias `pixelpilot`)
-      #      and KEYSTORE_PASSWORD environment secrets
-      #   3. swap the step below back to:
-      #        ./gradlew assembleRelease \
-      #          -Pandroid.injected.signing.store.file=$KEYSTORE_PATH \
-      #          -Pandroid.injected.signing.store.password=$KEYSTORE_PASSWORD \
-      #          -Pandroid.injected.signing.key.alias=pixelpilot \
-      #          -Pandroid.injected.signing.key.password=$KEYSTORE_PASSWORD
-      - name: Build debug APK
+      # Decode the base64 keystore secret into a real .jks file for signing.
+      - name: Decode signing keystore
+        if: env.ANDROID_KEYSTORE != ''
+        run: echo "$ANDROID_KEYSTORE" | base64 -d > fpv.jks
+
+      # Release-signed APK (alias `fpv`, store/key password from KEYSTORE_PASSWORD).
+      # If the keystore secret is absent we fall back to the debug-signed APK so CI
+      # stays green on forks without signing secrets.
+      - name: Build release APK
+        if: env.ANDROID_KEYSTORE != ''
+        run: |
+          ./gradlew assembleRelease \
+            -Pandroid.injected.signing.store.file=$PWD/fpv.jks \
+            -Pandroid.injected.signing.store.password=$KEYSTORE_PASSWORD \
+            -Pandroid.injected.signing.key.alias=$KEY_ALIAS \
+            -Pandroid.injected.signing.key.password=$KEYSTORE_PASSWORD
+          mv app/build/outputs/apk/release/app-release.apk PixelPilot.apk
+
+      - name: Build debug APK (no signing secret)
+        if: env.ANDROID_KEYSTORE == ''
         run: |
           ./gradlew assembleDebug
           mv app/build/outputs/apk/debug/app-debug.apk PixelPilot.apk
