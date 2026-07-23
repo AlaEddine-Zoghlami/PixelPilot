@@ -52,19 +52,40 @@ public class GLFanoutManager implements SurfaceTexture.OnFrameAvailableListener 
     private long lastDisplayNs = 0;
     private static final long DISPLAY_INTERVAL_NS = 16_666_667L; // 60fps display cap
 
+    // Stage-timing instrumentation (temporary, for localizing the multi-second BLAST
+    // "didn't commit buffer" stalls seen at high throughput): wraps each of the three
+    // native/framework calls this callback makes and logs whichever one actually blocks.
+    // Threshold well above any normal per-call cost (sub-ms to a couple ms) so only a
+    // genuine stall trips it, not routine jitter.
+    private static final long STAGE_WARN_NS = 30_000_000L; // 30ms
+
     @Override
     public void onFrameAvailable(SurfaceTexture st) {
         if (nativeHandle == 0 || surfaceTexture == null) return;
         try {
+            long t0 = System.nanoTime();
             surfaceTexture.updateTexImage();   // always drain to release decoder buffers
+            long t1 = System.nanoTime();
             surfaceTexture.getTransformMatrix(texMatrix);
-            long now = System.nanoTime();
-            if (now - lastDisplayNs < DISPLAY_INTERVAL_NS) {
+            long now = t1;
+            long t2, t3;
+            boolean didSwap = now - lastDisplayNs >= DISPLAY_INTERVAL_NS;
+            if (!didSwap) {
                 // Encode-only: feed the DVR at full rate, don't swap to display
+                t2 = System.nanoTime();
                 nativeRenderFrameEncodeOnly(nativeHandle, texMatrix);
+                t3 = System.nanoTime();
             } else {
                 lastDisplayNs = now;
+                t2 = System.nanoTime();
                 nativeRenderFrame(nativeHandle, texMatrix);
+                t3 = System.nanoTime();
+            }
+            long dUpdate = t1 - t0, dRender = t3 - t2;
+            if (dUpdate > STAGE_WARN_NS || dRender > STAGE_WARN_NS) {
+                android.util.Log.w("GLFanoutStage",
+                    "slow stage: updateTexImage=" + (dUpdate / 1_000_000) + "ms render="
+                    + (dRender / 1_000_000) + "ms (display=" + (didSwap ? "swap" : "skip") + ")");
             }
         } catch (Exception e) { /* SurfaceTexture released — ignore */ }
     }

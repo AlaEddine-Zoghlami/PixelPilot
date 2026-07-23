@@ -2393,6 +2393,14 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         videoPlayer.stopAudio();
         wfbLinkManager.stopAdapters();
         apfpvLinkManager.stopAdapters();   // APFPV dongle disconnect (was missing!)
+        // APFPV phone-Wi-Fi: ApfpvWifiManager.start() no-ops if `running` is still true
+        // (its guard: "if (running) return;"). Without stopping here, the Wi-Fi binding/
+        // network callback goes stale while backgrounded (Android reaps/deprioritizes a
+        // backgrounded app's network state), but onResume()'s start() call is silently
+        // ignored because `running` never went back to false — so resume never actually
+        // reconnects ("app resume reconnect is not working"). Mirror the dongle path:
+        // always tear down on pause so resume's start() does a real reconnect.
+        if (apfpvWifiManager != null) apfpvWifiManager.stop();
 
         // Stop VPN service
         Log.w(TAG, "onPause: stopping service");

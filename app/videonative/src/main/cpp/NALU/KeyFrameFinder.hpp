@@ -79,7 +79,15 @@ class KeyFrameFinder
 
     static void appendNaluData(std::vector<uint8_t>& buff, const NALU& nalu)
     {
-        buff.insert(buff.begin(), nalu.getData(), nalu.getData() + nalu.getSize());
+        // APPEND, not prepend. This used to insert at buff.begin() on every call, so three
+        // calls in the caller's intended order (VPS, SPS, PPS) actually produced the csd-0
+        // buffer in REVERSE (PPS, SPS, VPS). The AOSP software HEVC decoder tolerates
+        // out-of-order parameter sets (buffers all NALs, resolves vps_id/sps_id references
+        // after a full parse), which is why this went unnoticed — but MTK's HW decoder
+        // (c2.mtk.hevc.decoder) appears to parse sequentially/statefully and needs canonical
+        // VPS->SPS->PPS order; fed PPS first with no SPS/VPS context yet, it fell back to a
+        // default resolution (176x144) and then hard-failed (C2MtkVdec FatalError(DecodeError)).
+        buff.insert(buff.end(), nalu.getData(), nalu.getData() + nalu.getSize());
     }
 
     void reset()

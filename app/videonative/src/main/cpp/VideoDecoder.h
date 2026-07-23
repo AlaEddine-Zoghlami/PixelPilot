@@ -10,7 +10,10 @@
 #include <jni.h>
 #include <media/NdkMediaCodec.h>
 #include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <iostream>
+#include <mutex>
 #include <thread>
 #include "NALU/KeyFrameFinder.hpp"
 #include "NALU/NALU.hpp"
@@ -105,6 +108,16 @@ class VideoDecoder
     // Wait for input buffer to become available before feeding NALU
     void feedDecoder(const NALU& nalu, int idx);
 
+    // Drains mFeedQueue and calls feedDecoder(). Runs on its own thread so that a slow
+    // AMediaCodec_dequeueInputBuffer/decode (SW HEVC on this SoC measured ~11-24ms/frame,
+    // exceeding the 90-120fps budget) can NEVER stall the RTP-receive/parse thread that calls
+    // interpretNALU(). Before this, feedDecoder() ran INLINE in interpretNALU() — meaning once
+    // decode fell behind, the same thread that drains incoming RTP/UDP data was blocked on it,
+    // so network processing backed up too (measured as the "Parsing" latency stat, which is
+    // mostly this compounding backlog, not actual bitstream parsing cost). Bounded queue with
+    // drop-oldest keeps added latency capped instead of growing without limit.
+    void feedLoop();
+
     // Runs until EOS arrives at output buffer or decoder is stopped
     void checkOutputLoop(int idx);
 
@@ -114,6 +127,16 @@ class VideoDecoder
     void resetStatistics();
 
     std::unique_ptr<std::thread> mCheckOutputThread[2]  = {nullptr, nullptr};
+    // Decode-feed queue: interpretNALU() copies+enqueues (fast, no AMediaCodec calls) instead of
+    // calling feedDecoder() directly. mFeedThread drains it. Bounded so a persistent decode
+    // backlog is capped at FEED_QUEUE_MAX frames of extra latency (oldest dropped on overflow)
+    // instead of growing unbounded — mirrors the UDPReceiver recv/dispatch decouple pattern.
+    std::deque<std::unique_ptr<NALUBuffer>> mFeedQueue;
+    std::mutex                              mFeedQueueMtx;
+    std::condition_variable                 mFeedQueueCv;
+    std::atomic<bool>                       mFeedThreadRunning{false};
+    std::unique_ptr<std::thread>             mFeedThread;
+    static constexpr size_t                  FEED_QUEUE_MAX = 8;
     bool                         USE_SW_DECODER_INSTEAD = false;
     // FPV latency-priority decode (APFPV). Set in configureStartDecoder from the SoC + the runtime
     // gate `persist.pixelpilot.mtkopt` (default ON; `setprop ... 0` reverts to legacy for A/B).
@@ -129,6 +152,12 @@ class VideoDecoder
     // setFlushThresholdMs(); plain int (benign 1-frame race on retune).
     int                          mFlushThresholdMs = 60;  // MTK-optimized: flush stale frames at 60ms
     bool                         mFlushForceDisabled = false;  // sticky: MTK SW-HEVC disables flush-to-keyframe permanently (setFlushThresholdMs can't re-arm it)
+    // Stall-recovery watchdog (checkOutputLoop, idx 0 only): counts consecutive ~1s windows where
+    // NALUs are still arriving (currentKiloBitsPerSecond > 0) but the decoder has produced ~0
+    // frames. A HW decoder ASIC can wedge permanently on a single malformed/corrupted NALU
+    // (CCMP decrypt-fail / torn frame under RF loss, which grows with throughput) — unlike a SW
+    // decoder it won't self-recover, so without this it stays stuck forever. See VideoDecoder.cpp.
+    int                          mStallTicks = 0;
     // Holds the AMediaCodec instance, as well as the state (configured or not configured)
     Decoder      decoder{};
     DecodingInfo decodingInfo;

@@ -38,6 +38,11 @@ void VideoDecoder::setOutputSurface(JNIEnv* env, jobject surface, jint idx)
         inputPipeClosed = true;
         if (decoder.configured[idx])
         {
+            // feedLoop() now runs on its own thread (decoupled from RTP-receive) and reads
+            // decoder.codec[idx] under mCodecFlushMtx[idx] before using it (see feedDecoder).
+            // Take the same lock here so this delete+nullify can't race a feedDecoder() call
+            // for this idx in flight on that thread.
+            std::lock_guard<std::mutex> flushLock(mCodecFlushMtx[idx]);
             AMediaCodec_stop(decoder.codec[idx]);
             AMediaCodec_delete(decoder.codec[idx]);
             decoder.codec[idx] = nullptr;
@@ -103,12 +108,35 @@ void VideoDecoder::interpretNALU(const NALU& nalu)
     }
     if (decoder.configured[0] || decoder.configured[1])
     {
-        // Feed ONLY decoders that are actually configured. In VR we now run a single decode
-        // (idx 0) and fan it to both eyes via GL, so idx 1 has no codec -> feeding it would
-        // deref a null AMediaCodec. (When both are configured, e.g. legacy dual-decode, both feed.)
-        if (decoder.configured[0]) feedDecoder(nalu, 0);
-        if (decoder.configured[1]) feedDecoder(nalu, 1);
-        decodingInfo.nNALUSFeeded++;
+        // Enqueue a COPY (fast: one vector alloc+memcpy, no AMediaCodec calls) for the dedicated
+        // feed thread to process. This is the RTP-receive/parse thread — it must never block on
+        // the codec, or a slow decode step (measured ~11-24ms/frame on this SoC's SW HEVC path,
+        // already over the 90-120fps budget) stalls incoming network processing too.
+        {
+            std::lock_guard<std::mutex> qlk(mFeedQueueMtx);
+            if (mFeedQueue.size() >= FEED_QUEUE_MAX)
+            {
+                // DIAG: this was a completely silent drop path before -- the OSD's "drop %" stat
+                // (nNALU - nNALUSFeeded) counts it, but nothing logged WHEN/HOW OFTEN it fires. A
+                // burst here (feed thread busy on one slow feedDecoder() call while frames keep
+                // arriving at 60-120fps) drops several consecutive NALUs at once -- exactly the
+                // shape of a "tail artifact" (a chunk of missing reference data), independent of
+                // RF loss or the decoder's own throughput ceiling. Rate-limited to avoid flooding.
+                static thread_local uint64_t dropCount = 0, lastLogMs = 0;
+                dropCount++;
+                auto nowMs = (uint64_t) duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+                if (nowMs - lastLogMs > 500)
+                {
+                    __android_log_print(ANDROID_LOG_WARN, "VideoDecoder",
+                        "mFeedQueue overflow: dropped %llu NALU(s) in last %llums (feed thread can't keep up)",
+                        (unsigned long long) dropCount, (unsigned long long) (nowMs - lastLogMs));
+                    dropCount = 0; lastLogMs = nowMs;
+                }
+                mFeedQueue.pop_front();  // drop oldest, bounded latency
+            }
+            mFeedQueue.push_back(std::make_unique<NALUBuffer>(nalu));
+        }
+        mFeedQueueCv.notify_one();
         // manually feeding AUDs doesn't seem to change anything for high latency streams
         // Only for the x264 sw encoded example stream it might improve latency slightly
         // if(!nalu.IS_H265_PACKET && nalu.get_nal_unit_type()==NAL_UNIT_TYPE_CODED_SLICE_NON_IDR){
@@ -181,25 +209,44 @@ void VideoDecoder::configureStartDecoder(int idx)
         // stream (VHT-2SS H265 1472x816 @120fps) — verified: HW decoded 2 frames then stuck, SW climbs
         // 0→478→570. (It also renders black to a direct SurfaceView, androidx/media #2711/#2765.) So
         // force the SOFTWARE HEVC decoder (c2.android.hevc.decoder), which sustains via our GL fan-out.
-        // debug.pixelpilot.hwhevc=1 forces HW back for testing.
-        if (hwHevc[0] != '1' && mtk)
+        // ROOT CAUSE of the old "MTK HW HEVC freezes" workaround found: KeyFrameFinder::
+        // appendNaluData built the combined VPS+SPS+PPS csd-0 buffer by inserting each NAL at
+        // buff.begin(), which reversed the intended order into PPS,SPS,VPS. The permissive AOSP
+        // SW parser tolerated it (buffers all NALs, resolves references after a full parse); the
+        // MTK HW decoder (stateful/sequential) choked on it -- reported the wrong resolution
+        // (176x144) then hit a fatal decode error. Fixed in KeyFrameFinder.hpp (verified: HW now
+        // sustains the real 1472x816 @120fps with 0 discards). HW HEVC decode is now the DEFAULT
+        // on MTK; debug.pixelpilot.hwhevc=0 forces the SW decoder back for A/B/regression testing.
+        if (hwHevc[0] == '0' && mtk)
         {
             __android_log_print(ANDROID_LOG_WARN, "VideoDecoder",
-                "MediaTek SoC '%s' (api>=35): HW HEVC freezes -> forcing SW c2.android.hevc.decoder", plat.c_str());
+                "debug.pixelpilot.hwhevc=0 -> forcing SW c2.android.hevc.decoder");
             AMediaCodec_delete(decoder.codec[idx]);
             AMediaCodec* sw = AMediaCodec_createCodecByName("c2.android.hevc.decoder");
             decoder.codec[idx] = (sw != nullptr) ? sw : AMediaCodec_createDecoderByType(MIME.c_str());
-            // The SW HEVC decoder's output is always >60ms old, so the flush-to-keyframe path would
-            // fire every frame -> renderFps=0 (black/freeze) + a flush storm. Disable it; drop-to-
-            // freshest still caps latency. STICKY so onResume's setVideoFlushMs(UI default 60) can't
-            // re-arm it (that clobber was the ~7s renderFps=0 freezes on the dongle path).
-            mFlushThresholdMs = 0;
-            mFlushForceDisabled = true;
         }
-        else if (hwHevc[0] == '1')
+        else if (mtk)
         {
             __android_log_print(ANDROID_LOG_WARN, "VideoDecoder",
-                "debug.pixelpilot.hwhevc=1 -> keeping MTK HW HEVC decoder (may freeze on this SoC)");
+                "MediaTek SoC '%s': keeping HW HEVC decoder (csd-0 order fixed)", plat.c_str());
+        }
+        // The stale-frame flush-to-keyframe path (mFlushThresholdMs, default 60ms) treats any late
+        // frame as unrecoverable staleness and flushes to the next keyframe instead of rendering it
+        // -- but flushing DISCARDS decode progress, so if decode is EVER transiently >60ms behind
+        // (thermal ramp, a GC pause, one slow frame) it can never catch back up: every subsequent
+        // frame is "late" relative to the flush that just happened, so it flushes again forever
+        // (observed: outputFps stays a nonzero 8-10 -- still decoding -- while renderFps sits at 0,
+        // i.e. releaseOutputBuffer(render=false) on nearly everything). Previously only disabled
+        // for the SW-fallback branch on the theory this was SW-decoder-specific; it isn't -- the
+        // mechanism applies to any decoder that ever falls behind, HW included (reproduced live:
+        // a clean 120fps/0-discard HW run collapsed to this exact pattern after ~30s). Disable it
+        // for MTK regardless of which decoder is selected. STICKY so onResume's setVideoFlushMs
+        // (UI default 60) can't re-arm it. Drop-to-freshest (checkOutputLoop, default OFF) still
+        // caps latency without this all-or-nothing keyframe-flush behavior.
+        if (mtk)
+        {
+            mFlushThresholdMs = 0;
+            mFlushForceDisabled = true;
         }
     }
 
@@ -246,7 +293,18 @@ void VideoDecoder::configureStartDecoder(int idx)
             AMediaFormat_setInt32(format, "operating-rate", 240);          // run decoder flat-out
             if (isMtk)
             {
-                AMediaFormat_setInt32(format, "vendor.mtk-videodec-low-latency", 1);
+                // The PREVIOUS key here ("vendor.mtk-videodec-low-latency") was not a real MTK
+                // parameter and MediaCodec silently ignores unknown format keys — it never reached
+                // the driver. The real one (confirmed by moonlight-android, which ships this exact
+                // fix for MTK devices) is "vdec-lowlatency": MTK's modified ACodec.cpp maps it to
+                // OMX.MTK.index.param.video.LowLatencyDecode, and MTK's own docs attribute it to
+                // fixing "the decoder not output[ting] any frames" on some devices — which matches
+                // our observed HW HEVC symptom exactly (decoded 2 frames then stuck, see the
+                // freeze-detection comment above). Without this key, the HW decoder likely holds a
+                // multi-frame internal reorder buffer sized for broadcast-style GOPs, which our
+                // low-latency FPV stream never fills -> stall. Set it in addition to the generic
+                // keys above (harmless if wrong; this one is the one that actually matters on MTK).
+                AMediaFormat_setInt32(format, "vdec-lowlatency", 1);
             }
             __android_log_print(ANDROID_LOG_INFO, "VideoDecoder",
                 "FPV low-latency opt-in ON (mtk=%d, flush=%dms)", (int) isMtk, mFlushThresholdMs);
@@ -329,6 +387,16 @@ void VideoDecoder::configureStartDecoder(int idx)
     mCheckOutputThread[idx] = std::make_unique<std::thread>(&VideoDecoder::checkOutputLoop, this, idx);
     NDKThreadHelper::setName(mCheckOutputThread[idx]->native_handle(), "LLDCheckOutput");
     decoder.configured[idx] = true;
+
+    // Start the shared decode-feed thread once (idx 0 and 1 both call configureStartDecoder;
+    // only the first one actually needs to spin it up). Runs for the process lifetime, same as
+    // this VideoDecoder instance itself (no explicit destructor tears it down today).
+    bool expected = false;
+    if (mFeedThreadRunning.compare_exchange_strong(expected, true))
+    {
+        mFeedThread = std::make_unique<std::thread>(&VideoDecoder::feedLoop, this);
+        NDKThreadHelper::setName(mFeedThread->native_handle(), "DecoderFeed");
+    }
 }
 
 void VideoDecoder::feedDecoder(const NALU& nalu, int idx)
@@ -394,11 +462,9 @@ void VideoDecoder::feedDecoder(const NALU& nalu, int idx)
         {
             // Spin-wait: at 120fps the decode pipeline needs every µs.
             // Sleeping here (even 0.5ms) starves the decoder input at high frame rates.
-            // BUT this runs on the shared parse/RX thread — if the decoder's input buffers stay
-            // full (a real backlog), blocking here also stops NALU parsing and RX draining, so the
-            // UDP socket overflows -> packet loss -> more decode errors (a cascade). For lag
-            // priority, cap the wait low and DROP this NALU instead of stalling RX; drop-to-freshest
-            // on the output side keeps input buffers freeing quickly so this rarely trips.
+            // This now runs on the DEDICATED feed thread (see feedLoop()) — RTP/UDP receive is
+            // decoupled via mFeedQueue, so blocking here no longer stalls network processing.
+            // Still cap the wait and drop rather than block indefinitely on a wedged codec.
             const auto elapsedTimeTryingForBuffer = std::chrono::steady_clock::now() - now;
             if (elapsedTimeTryingForBuffer > std::chrono::milliseconds(100))
             {
@@ -406,6 +472,19 @@ void VideoDecoder::feedDecoder(const NALU& nalu, int idx)
                       << MyTimeHelper::R(elapsedTimeTryingForBuffer) << " — drop NALU, unblock RX.";
                 return;
             }
+            // MUTEX-STARVATION FIX: mCodecFlushMtx[idx] is re-acquired every ~5ms in this loop
+            // (each dequeueInputBuffer call blocks for up to BUFFER_TIMEOUT_US while HOLDING it,
+            // then it's released only for the instant between iterations). pthread_mutex on
+            // Android gives no fairness guarantee, so when the input pool stays exhausted across
+            // many consecutive NALUs (i.e. sustained high bitrate — exactly when it matters most),
+            // this thread can re-lock continuously with near-zero gap and starve a low-frequency
+            // waiter — specifically checkOutputLoop's stall-recovery AMediaCodec_flush(), which
+            // only attempts the SAME lock once per ~1s window. That starvation looked exactly like
+            // an unrelated "hang": GL-thread timing clean, RX healthy, yet recovery never lands.
+            // yield() is ~free when uncontended (returns immediately if no one else wants the
+            // CPU) but gives the scheduler a real chance to hand the mutex to the flush waiter
+            // instead of this thread winning the re-acquire race every time.
+            std::this_thread::yield();
         }
         else
         {
@@ -413,6 +492,30 @@ void VideoDecoder::feedDecoder(const NALU& nalu, int idx)
             MLOGD << "dequeueInputBuffer idx " << (int) index << "return.";
             return;
         }
+    }
+}
+
+void VideoDecoder::feedLoop()
+{
+    NDKThreadHelper::setProcessThreadPriorityAttachDetach(javaVm, mLowLatencyOpt ? -20 : -16, "DecoderFeed");
+    while (mFeedThreadRunning.load())
+    {
+        std::unique_ptr<NALUBuffer> item;
+        {
+            std::unique_lock<std::mutex> qlk(mFeedQueueMtx);
+            mFeedQueueCv.wait_for(qlk, std::chrono::milliseconds(50),
+                [this] { return !mFeedQueue.empty() || !mFeedThreadRunning.load(); });
+            if (mFeedQueue.empty()) continue;
+            item = std::move(mFeedQueue.front());
+            mFeedQueue.pop_front();
+        }
+        const NALU& nalu = item->get_nal();
+        // Feed ONLY decoders that are actually configured. In VR we run a single decode (idx 0)
+        // and fan it to both eyes via GL, so idx 1 has no codec -> feeding it would deref a null
+        // AMediaCodec. (When both are configured, e.g. legacy dual-decode, both feed.)
+        if (decoder.configured[0]) feedDecoder(nalu, 0);
+        if (decoder.configured[1]) feedDecoder(nalu, 1);
+        decodingInfo.nNALUSFeeded++;
     }
 }
 
@@ -539,6 +642,31 @@ void VideoDecoder::checkOutputLoop(int idx)
             if (onDecodingInfoChangedCallback != nullptr)
             {
                 onDecodingInfoChangedCallback(decodingInfo);
+            }
+            // STALL-RECOVERY WATCHDOG: data is still arriving (kbps > 1) but the decoder has
+            // produced ~0 frames this window (fps < 2) -> the decoder (HW ASIC especially) is
+            // wedged, most likely on a single malformed/corrupted NALU (CCMP decrypt-fail or a
+            // torn frame under RF loss — both grow with throughput, which is why this shows up
+            // specifically above a bitrate threshold and never on its own at low bitrate). A SW
+            // decoder degrades gracefully on bad input; a HW decoder can latch permanently, and
+            // nothing else in this pipeline ever un-wedges it. Two consecutive stalled windows
+            // (~2s, avoiding a false trip on one slow-but-recovering tick) -> force a flush to
+            // resync on the next keyframe, same lock discipline as the flush-to-keyframe path.
+            if (decodingInfo.currentKiloBitsPerSecond > 1.0f && decodingInfo.currentFPS < 2.0f)
+            {
+                if (++mStallTicks >= 2)
+                {
+                    __android_log_print(ANDROID_LOG_WARN, "VideoDecoder",
+                        "decode stalled (kbps=%.0f fps=%.1f) with data still arriving -> forcing "
+                        "recovery flush", decodingInfo.currentKiloBitsPerSecond, decodingInfo.currentFPS);
+                    std::lock_guard<std::mutex> lk(mCodecFlushMtx[idx]);
+                    if (decoder.codec[idx]) AMediaCodec_flush(decoder.codec[idx]);
+                    mStallTicks = 0;
+                }
+            }
+            else
+            {
+                mStallTicks = 0;
             }
         }
     }
