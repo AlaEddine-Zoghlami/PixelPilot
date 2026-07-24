@@ -320,6 +320,10 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
             getWindow().setAttributes(lp);
             Log.i(TAG, "Requested display mode " + best.getPhysicalWidth() + "x"
                 + best.getPhysicalHeight() + "@" + best.getRefreshRate() + "Hz");
+            // The GL fan-out's display-swap throttle (GLFanoutManager) otherwise assumes a fixed
+            // 60Hz panel; tell it the real negotiated rate so a 120Hz panel actually gets fed at
+            // 120fps instead of being capped at half rate against a stale assumption.
+            com.openipc.videonative.GLFanoutManager.setDisplayRefreshRateHz(best.getRefreshRate());
         } catch (Throwable t) { Log.w(TAG, "refresh-rate request failed: " + t); }
 
         // On-device log capture: this phone has ONE USB-C port, so the dongle and USB-adb can't be

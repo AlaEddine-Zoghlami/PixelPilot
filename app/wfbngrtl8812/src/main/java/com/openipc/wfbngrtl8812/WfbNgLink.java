@@ -92,10 +92,18 @@ public class WfbNgLink implements WfbNGStatsChanged {
         nativeSetUseStbc(nativeWfbngLink, use);
     }
 
-    public synchronized void start(int wifiChannel, int bandWidth, UsbDevice usbDevice) {
+    public synchronized boolean start(int wifiChannel, int bandWidth, UsbDevice usbDevice) {
         Log.d(TAG, "wfb-ng monitoring on " + usbDevice.getDeviceName() + " using wifi channel " + wifiChannel);
         UsbManager usbManager = (UsbManager) context.getSystemService(Context.USB_SERVICE);
+        // openDevice() returns null if the open races (e.g. right after a replug/teardown, or
+        // the fd is still held by the stack we just tore down) -- must not deref it for
+        // getFileDescriptor(), or a reattach after a real physical unplug crashes with an NPE
+        // instead of just failing to (re)start.
         UsbDeviceConnection usbDeviceConnection = usbManager.openDevice(usbDevice);
+        if (usbDeviceConnection == null) {
+            Log.e(TAG, "wfb-ng: openDevice() returned null on " + usbDevice.getDeviceName());
+            return false;
+        }
         int fd = usbDeviceConnection.getFileDescriptor();
         Thread t = new Thread(() -> nativeRun(nativeWfbngLink, context, wifiChannel, bandWidth, fd));
         t.setName("wfb-" + usbDevice.getDeviceName().split("/dev/bus/usb/")[1]);
@@ -103,6 +111,7 @@ public class WfbNgLink implements WfbNGStatsChanged {
         linkConns.put(usbDevice, usbDeviceConnection);
         linkThreads.get(usbDevice).start();
         Log.d(TAG, "wfb-ng thread on " + usbDevice.getDeviceName() + " started.");
+        return true;
     }
 
     public synchronized void stopAll() throws InterruptedException {
@@ -116,7 +125,14 @@ public class WfbNgLink implements WfbNGStatsChanged {
             }
             Log.d(TAG, "wfb-ng thread on " + entry.getKey().getDeviceName() + " done.");
         }
+        // Release every connection's fd -- otherwise it's leaked (the device stays "busy" from
+        // Android's perspective), so a subsequent openDevice() on a re-inserted dongle can
+        // fail/race and return null (the case just guarded against in start()).
+        for (UsbDeviceConnection conn : linkConns.values()) {
+            try { conn.close(); } catch (Exception ignored) {}
+        }
         linkThreads.clear();
+        linkConns.clear();
     }
 
     public synchronized void stop(UsbDevice dev) throws InterruptedException {
@@ -131,6 +147,10 @@ public class WfbNgLink implements WfbNGStatsChanged {
             t.join();
         }
         linkThreads.remove(dev);
+        // Release the fd -- otherwise it's leaked and the device stays "busy" from Android's
+        // perspective, so a subsequent openDevice() on a re-inserted dongle can fail/race.
+        try { conn.close(); } catch (Exception ignored) {}
+        linkConns.remove(dev);
     }
 
     public void SetWfbNGStatsChanged(final WfbNGStatsChanged callback) {

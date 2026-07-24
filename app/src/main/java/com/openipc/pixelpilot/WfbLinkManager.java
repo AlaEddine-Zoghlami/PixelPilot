@@ -221,7 +221,10 @@ public class WfbLinkManager extends BroadcastReceiver {
         String text = "Starting wfb-ng channel " + wifiChannel + " with " + String.format(
                 "[%04X", dev.getVendorId()) + ":" + String.format("%04X]", dev.getProductId());
         binding.tvMessage.setText(text);
-        wfbLink.start(wifiChannel, bandWidth.getValue(), dev);
-        return true;
+        boolean ok = wfbLink.start(wifiChannel, bandWidth.getValue(), dev);
+        if (!ok) {
+            binding.tvMessage.setText("wfb-ng: couldn't open dongle (busy or removed)");
+        }
+        return ok;
     }
 }

@@ -58,6 +58,7 @@ struct GlDvrW
     int               fps      = 30;
     bool              wrInited = false;
     int64_t           ptsBase  = -1;   // first frame's PTS (us); deltas become the 90kHz sample TS
+    unsigned          lastTs90k = 0;   // previous sample's absolute 90kHz TS, to derive a per-sample duration
 };
 }  // namespace
 extern "C" void* glfanout_dvr_start(int fd, int w, int h, int fps, int fmp4, int h265)
@@ -97,7 +98,12 @@ extern "C" void glfanout_dvr_write(void* dvr, const uint8_t* data, size_t size, 
         long long deltaUs = (long long) ptsUs - d->ptsBase;
         if (deltaUs < 0) deltaUs = 0;
         ts90k = (unsigned) ((deltaUs * 90) / 1000);
-        int r = mp4_h26x_write_nal(&d->wr, data, size, ts90k);
+        // mp4_h26x_write_nal's last argument is THIS sample's duration (minimp4 sums it into the
+        // track/movie duration), not an absolute timestamp -- pass the delta from the previous
+        // sample's absolute TS, not the cumulative-since-start value computed above.
+        unsigned sampleDur = (ts90k > d->lastTs90k) ? (ts90k - d->lastTs90k) : 0;
+        d->lastTs90k = ts90k;
+        int r = mp4_h26x_write_nal(&d->wr, data, size, sampleDur);
         if (cnt < 6) __android_log_print(ANDROID_LOG_DEBUG, "GLFanoutDbg", "  write_nal r=%d ts90k=%u", r, ts90k);
     }
 }
@@ -119,6 +125,7 @@ void VideoPlayer::processQueue()
     float             framerate = 0;
     bool              firstNalu = true;
     std::chrono::steady_clock::time_point tsBase;  // first frame's creationTime; deltas -> 90kHz sample TS
+    unsigned          lastTs90k = 0;  // previous sample's absolute 90kHz TS, to derive a per-sample duration
     if (mux == nullptr)
     {
         __android_log_print(ANDROID_LOG_ERROR, TAG, "dvr open failed");
@@ -171,8 +178,13 @@ void VideoPlayer::processQueue()
                                    nalu.creationTime - tsBase).count();
             if (deltaUs < 0) deltaUs = 0;
             unsigned ts90k = (unsigned) ((deltaUs * 90) / 1000);
+            // mp4_h26x_write_nal's last argument is THIS sample's duration (minimp4 sums it into
+            // the track/movie duration), not an absolute timestamp -- pass the delta from the
+            // previous sample's absolute TS, not the cumulative-since-start value above.
+            unsigned sampleDur = (ts90k > lastTs90k) ? (ts90k - lastTs90k) : 0;
+            lastTs90k = ts90k;
             // Process the NALU
-            auto res = mp4_h26x_write_nal(&mp4wr, nalu.getData(), nalu.getSize(), ts90k);
+            auto res = mp4_h26x_write_nal(&mp4wr, nalu.getData(), nalu.getSize(), sampleDur);
             if (MP4E_STATUS_OK != res)
             {
                 __android_log_print(ANDROID_LOG_DEBUG, TAG, "mp4_h26x_write_nal failed with %d", res);

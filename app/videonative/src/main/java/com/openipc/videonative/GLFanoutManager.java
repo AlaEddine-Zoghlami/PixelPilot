@@ -38,19 +38,35 @@ public class GLFanoutManager implements SurfaceTexture.OnFrameAvailableListener 
     private final float[]  texMatrix = new float[16];
     private HandlerThread  glThread;
     private Handler        glHandler;
-    // Render throttle: the display refreshes at 60Hz (16.67ms). Rendering faster fills
+    // Render throttle: the display refreshes at its own fixed rate. Rendering faster fills
     // the BLAST buffer queue → NO_BUFFER_AVAILABLE → renderFps collapses to 0 after ~30s.
     // updateTexImage() drains every frame (releases SurfaceTexture buffers so the decoder
     // never blocks), but eglSwapBuffers is called at most once per display refresh.
-    // Display throttle: eglSwapBuffers on the display is rate-limited to ~60fps so BLAST buffers
-    // don't exhaust. But the DVR ENCODER must still receive every frame at the decode rate —
-    // otherwise its timestamps drift (encoder configured for 90fps, only gets 60fps → recording
-    // plays progressively slower, the "recording fps is wrong the longer the video" bug).
-    // nativeRenderFrameSkipDisplay runs the encode pass (eglSwapBuffers on encoder surface) but
-    // SKIPS eglSwapBuffers on the display surface — so the encoder stays in sync with the source
-    // while the display self-regulates at its own refresh rate.
+    // Display throttle: eglSwapBuffers on the display is rate-limited to the display's refresh
+    // rate so BLAST buffers don't exhaust. But the DVR ENCODER must still receive every frame at
+    // the decode rate — otherwise its timestamps drift (encoder configured for 90fps, only gets
+    // 60fps → recording plays progressively slower, the "recording fps is wrong the longer the
+    // video" bug). nativeRenderFrameEncodeOnly runs the encode pass (eglSwapBuffers on encoder
+    // surface) but SKIPS eglSwapBuffers on the display surface — so the encoder stays in sync
+    // with the source while the display self-regulates at its own refresh rate.
+    //
+    // The interval MUST match the display's actual negotiated refresh rate, not an assumed
+    // constant: on a 120Hz panel a hardcoded 60fps cap here means the display only gets a fresh
+    // buffer on roughly every other vsync, at whatever phase the free-running decode arrival
+    // happens to land in relative to that cap -- a beat/drift pattern between the two rates that
+    // reads as judder even though both the stream and the panel are genuinely ~120fps.
+    // VideoActivity calls setDisplayRefreshRateHz() with the mode it actually negotiated
+    // (Display.getSupportedModes()) once the window's attributes are applied. Default (60fps)
+    // only applies before that call lands or if it's never called.
     private long lastDisplayNs = 0;
-    private static final long DISPLAY_INTERVAL_NS = 16_666_667L; // 60fps display cap
+    private static volatile long DISPLAY_INTERVAL_NS = 16_666_667L; // 60fps fallback until VideoActivity reports the real rate
+
+    /** Called once VideoActivity knows the display's actual negotiated refresh rate, so the
+     *  display-swap throttle matches the real panel instead of an assumed 60Hz. */
+    public static void setDisplayRefreshRateHz(float hz) {
+        if (hz < 20f || hz > 1000f) return; // sanity-guard against a bogus/unavailable reading
+        DISPLAY_INTERVAL_NS = (long) (1_000_000_000L / hz);
+    }
 
     // Stage-timing instrumentation (temporary, for localizing the multi-second BLAST
     // "didn't commit buffer" stalls seen at high throughput): wraps each of the three
