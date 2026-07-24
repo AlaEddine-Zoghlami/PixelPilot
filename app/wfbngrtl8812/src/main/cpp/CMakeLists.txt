@@ -50,6 +50,16 @@ file(GLOB WD_SRC ${WD}/src/*.cpp ${WD}/src/*.c ${WD}/src/crypto/*.cpp)
 
 # ARM-CE not yet (toolchain needs float-abi=hard). Software AES with key cache.
 
+# NOTE: upstream's merged-in RTL8812EU/RTL8822EU adapter support (#104) used
+# an entirely different devourer architecture here -- a "Jaguar1/Jaguar3"
+# chip-generation abstraction with its own RtlAdapter.cpp/UsbTransport.cpp/
+# etc, no ApfpvStation.cpp or WPA2 station-mode stack at all. That's upstream
+# OpenIPC/devourer's own (much-diverged, ~160-commits-ahead) fork lineage,
+# not compatible with -- and not present in -- our own devourer submodule
+# (AlaEddine-Zoghlami/Devourer), which still uses the WD_HAL/WD_SRC layout
+# below. Kept ours; porting EU-adapter support would mean adding it to our
+# fork's own source layout, a separate task, not something this merge does.
+
 # --- the .so: driver + Station L2 + crypto + APFPV layer + wfb logic + JNI --
 add_library(${CMAKE_PROJECT_NAME} SHARED
         ${WD_HAL}

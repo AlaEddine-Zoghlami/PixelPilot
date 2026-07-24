@@ -341,6 +341,7 @@ void VideoPlayer::start(JNIEnv* env, jobject androidContext)
         -16,
         [this](const uint8_t* data, size_t data_length) { onNewRTPData(data, data_length); },
         WANTED_UDP_RCVBUF_SIZE);
+    mUDPReceiver->setForwarding(mForwardIP, mForwardPort, mForwardEnabled);
     mUDPReceiver->startReceiving();
 
     mUDSReceiver.release();
@@ -420,6 +421,17 @@ void VideoPlayer::stopDvr()
     stopProcessing();
 }
 
+void VideoPlayer::setForwarding(const std::string& ip, int port, bool enabled)
+{
+    mForwardIP = ip;
+    mForwardPort = port;
+    mForwardEnabled = enabled;
+    if (mUDPReceiver)
+    {
+        mUDPReceiver->setForwarding(ip, port, enabled);
+    }
+}
+
 //----------------------------------------------------JAVA
 // bindings---------------------------------------------------------------
 #define JNI_METHOD(return_type, method_name) \
@@ -461,6 +473,19 @@ extern "C"
     (JNIEnv* env, jclass jclass1, jlong videoPlayerN, jobject androidContext)
     {
         native(videoPlayerN)->stop(env, androidContext);
+    }
+
+    JNI_METHOD(void, nativeSetUdpForwarding)
+    (JNIEnv* env, jclass jclass1, jlong nativeInstance, jstring ipStr, jint port, jboolean enabled)
+    {
+        VideoPlayer* p = native(nativeInstance);
+        if (p)
+        {
+            const char* ip = env->GetStringUTFChars(ipStr, nullptr);
+            std::string ip_cpp(ip);
+            env->ReleaseStringUTFChars(ipStr, ip);
+            p->setForwarding(ip_cpp, port, enabled);
+        }
     }
 
     JNI_METHOD(void, nativeSetVideoSurface)

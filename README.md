@@ -42,13 +42,13 @@ where (brace yourself) most things actually work.
 Built on the work of:
 
 - [FPVue_android](https://github.com/gehee/FPVue_android): basic and unique work to combine all components into a single application by [Gee He](https://github.com/gehee).
-- [devourer](https://github.com/AlaEddine-Zoghlami/Devourer) (**APFPV fork**): userspace RTL8812AU driver, originally created by [buldo](https://github.com/buldo), converted to C by [josephnef](https://github.com/josephnef), and based on [openipc/devourer](https://github.com/openipc/devourer). The fork adds the APFPV station-mode stack (WPA2 supplicant, scan/probe, 802.11 framing, DHCP, link-quality feedback).
+- [devourer](https://github.com/AlaEddine-Zoghlami/Devourer) (**APFPV fork**): userspace Realtek 11ac driver (rtl8812au + rtl8812eu + rtl8822eu), originally created by [buldo](https://github.com/buldo), converted to C by [josephnef](https://github.com/josephnef), and based on [openipc/devourer](https://github.com/openipc/devourer). The fork adds the APFPV station-mode stack (WPA2 supplicant, scan/probe, 802.11 framing, DHCP, link-quality feedback).
 - [LiveVideo10ms](https://github.com/Consti10/LiveVideo10ms): excellent video decoder from [Consti10](https://github.com/Consti10) converted into a module.
 - [wfb-ng](https://github.com/svpcom/wfb-ng): library allowing the broadcast of the video feed over the air.
 
 The wfb-ng [gs.key](https://github.com/OpenIPC/PixelPilot/raw/main/app/src/main/assets/gs.key) is embedded in the app. The settings menu allows selecting a different key from your phone.
 
-Supported RTL8812AU adapters are listed [here](app/src/main/res/xml/usb_device_filter.xml). Feel free to send pull requests to add new supported adapter hardware IDs.
+Supported rtl8812au, rtl8812eu and rtl8822eu wifi adapters are listed [here](app/src/main/res/xml/usb_device_filter.xml). Feel free to send pull requests to add new supported adapter hardware IDs.
 
 Supports saving a DVR of the video feed to `Files/Internal Storage/Movies/`.
 

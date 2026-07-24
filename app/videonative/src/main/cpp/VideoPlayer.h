@@ -54,6 +54,8 @@ class VideoPlayer
 
     bool isRecording() { return (get_time_ms() - last_dvr_write) <= 500; }
 
+    void setForwarding(const std::string& ip, int port, bool enabled);
+
   private:
     void onNewNALU(const NALU& nalu);
 
@@ -141,6 +143,10 @@ class VideoPlayer
     }
 
     void processQueue();
+
+    std::string mForwardIP = "";
+    int         mForwardPort = 0;
+    bool        mForwardEnabled = false;
 
   public:
     AudioDecoder                 audioDecoder;

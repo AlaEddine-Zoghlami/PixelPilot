@@ -68,6 +68,8 @@ class UDPReceiver
 
     int getPort() const;
 
+    void setForwarding(const std::string& ip, int port, bool enabled);
+
   private:
     void receiveFromUDPLoop();
     void dispatchLoop();
@@ -101,6 +103,12 @@ class UDPReceiver
     // 65,507 bytes (65,535 − 8 byte UDP header − 20 byte IP header).
     static constexpr const size_t UDP_PACKET_MAX_SIZE = 65507;
     JavaVM*                       javaVm;
+
+    std::mutex                    mForwardMutex;
+    std::string                   mForwardIP      = "";
+    int                           mForwardPort    = 0;
+    bool                          mForwardEnabled = false;
+    struct sockaddr_in            mDestAddr;
 };
 
 #endif  // FPVUE_UDPRECEIVER_H

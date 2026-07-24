@@ -171,7 +171,20 @@ void UDPReceiver::receiveFromUDPLoop()
         // ssize_t message_length = recv(mSocket, buff, (size_t) mBuffsize, MSG_WAITALL);
         if (message_length > 0)
         {  // else -1 was returned;timeout/No data received
-            // Enqueue for the dispatch thread — NEVER run the (decoder-blocking) consumer here.
+            // 1. Forward packet first (minimize latency) -- upstream's local-network
+            // UDP forwarding feature; independent of how we process the packet locally.
+            {
+                std::lock_guard<std::mutex> lock(mForwardMutex);
+                if (mForwardEnabled)
+                {
+                    sendto(mSocket, buff->data(), message_length, 0, (struct sockaddr*) &mDestAddr, sizeof(mDestAddr));
+                }
+            }
+
+            // 2. Enqueue for the dispatch thread — NEVER run the (decoder-blocking)
+            // consumer here (our own recv/dispatch decoupling fix; a synchronous
+            // onDataReceivedCallback call here reintroduces the socket-overflow bug
+            // it was written to close).
             {
                 std::lock_guard<std::mutex> lk(mQueueMutex);
                 if (mQueue.size() >= QUEUE_MAX_PACKETS)
@@ -211,4 +224,20 @@ void UDPReceiver::receiveFromUDPLoop()
 int UDPReceiver::getPort() const
 {
     return mPort;
+}
+
+void UDPReceiver::setForwarding(const std::string& ip, int port, bool enabled)
+{
+    std::lock_guard<std::mutex> lock(mForwardMutex);
+    mForwardIP = ip;
+    mForwardPort = port;
+    mForwardEnabled = enabled;
+
+    memset(&mDestAddr, 0, sizeof(mDestAddr));
+    mDestAddr.sin_family = AF_INET;
+    mDestAddr.sin_port = htons(port);
+    if (inet_pton(AF_INET, ip.c_str(), &mDestAddr.sin_addr) <= 0)
+    {
+        mForwardEnabled = false;
+    }
 }
