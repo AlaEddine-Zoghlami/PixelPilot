@@ -1281,73 +1281,82 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
                 .getFloat("antenna_gain_db", (float) com.openipc.pixelpilot.apfpv.RfLimits.DEFAULT_ANTENNA_GAIN_DB);
         m.add(String.format(java.util.Locale.US, "Antenna gain: %.0f dBi…", gainNow))
             .setOnMenuItemClickListener(i -> { showAntennaGainDialog(); return true; });
-        // One-tap DE legal APFPV RF (dongle only — phone-Wi-Fi mode is regulated by
-        // the OS). 5.2 GHz UNII-1 ch40 (centered, in 5170-5250), 20 MHz (200 mW
-        // EIRP under the PSD cap). TX index derived from 200 mW EIRP MINUS the
-        // configured antenna gain. EIRP still depends on the real antenna — verify.
-        m.add("Apply DE legal limits").setOnMenuItemClickListener(i -> {
-            float gain = getSharedPreferences("pixelpilot", MODE_PRIVATE)
-                    .getFloat("antenna_gain_db", (float) com.openipc.pixelpilot.apfpv.RfLimits.DEFAULT_ANTENNA_GAIN_DB);
-            int idx = com.openipc.pixelpilot.apfpv.RfLimits.legalIndex(
-                    com.openipc.pixelpilot.apfpv.RfLimits.EIRP_APFPV_DBM, gain);
-            double cond = com.openipc.pixelpilot.apfpv.RfLimits.conductedDbm(
-                    com.openipc.pixelpilot.apfpv.RfLimits.EIRP_APFPV_DBM, gain);
-            getSharedPreferences("pixelpilot", MODE_PRIVATE).edit()
-                .putInt("apfpv_channel", 40).putInt("apfpv_bandwidth", 20).apply();
-            getSharedPreferences("general", MODE_PRIVATE).edit()
-                .putInt("adaptive_tx_power", idx).apply();
-            if (apfpvLinkManager != null) {
-                apfpvLinkManager.setChannel(40);
-                apfpvLinkManager.setBandwidth(20);
-            }
-            if (apfpvLink != null) apfpvLink.setTxPower(idx);
-            android.widget.Toast.makeText(this, String.format(java.util.Locale.US,
-                "APFPV → DE legal: 5.2 GHz ch40, 20 MHz. 200 mW EIRP − %.0f dB ant = %.0f dBm conducted (TX idx %d, ~%d mW). Verify w/ a meter. Reconnect to apply.",
-                gain, cond, idx, com.openipc.pixelpilot.apfpv.RfLimits.mw(cond)),
-                android.widget.Toast.LENGTH_LONG).show();
-            return true;
-        });
+        // One-tap DE legal APFPV RF, VRX beacon cal, dongle AP test, and Reconnect/adapter-list
+        // all drive the RTL8812 dongle directly (apfpvLinkManager.setChannel/setBandwidth,
+        // startBeaconCal, startDongleAp, refreshAdapters, WlxAdapters) — meaningless with no
+        // dongle attached, so gate on the dongle-station mode specifically, not the broader
+        // apfpvMode (which also covers phone-Wi-Fi, no dongle). Phone-Wi-Fi's TX power/channel
+        // are OS-controlled; see the Adaptive-link "TX power fixed in phone-Wi-Fi" toast.
+        if (linkMode == LinkModeCoordinator.Mode.APFPV) {
+            // 5.2 GHz UNII-1 ch40 (centered, in 5170-5250), 20 MHz (200 mW EIRP under the PSD
+            // cap). TX index derived from 200 mW EIRP MINUS the configured antenna gain. EIRP
+            // still depends on the real antenna — verify.
+            m.add("Apply DE legal limits").setOnMenuItemClickListener(i -> {
+                float gain = getSharedPreferences("pixelpilot", MODE_PRIVATE)
+                        .getFloat("antenna_gain_db", (float) com.openipc.pixelpilot.apfpv.RfLimits.DEFAULT_ANTENNA_GAIN_DB);
+                int idx = com.openipc.pixelpilot.apfpv.RfLimits.legalIndex(
+                        com.openipc.pixelpilot.apfpv.RfLimits.EIRP_APFPV_DBM, gain);
+                double cond = com.openipc.pixelpilot.apfpv.RfLimits.conductedDbm(
+                        com.openipc.pixelpilot.apfpv.RfLimits.EIRP_APFPV_DBM, gain);
+                getSharedPreferences("pixelpilot", MODE_PRIVATE).edit()
+                    .putInt("apfpv_channel", 40).putInt("apfpv_bandwidth", 20).apply();
+                getSharedPreferences("general", MODE_PRIVATE).edit()
+                    .putInt("adaptive_tx_power", idx).apply();
+                if (apfpvLinkManager != null) {
+                    apfpvLinkManager.setChannel(40);
+                    apfpvLinkManager.setBandwidth(20);
+                }
+                if (apfpvLink != null) apfpvLink.setTxPower(idx);
+                android.widget.Toast.makeText(this, String.format(java.util.Locale.US,
+                    "APFPV → DE legal: 5.2 GHz ch40, 20 MHz. 200 mW EIRP − %.0f dB ant = %.0f dBm conducted (TX idx %d, ~%d mW). Verify w/ a meter. Reconnect to apply.",
+                    gain, cond, idx, com.openipc.pixelpilot.apfpv.RfLimits.mw(cond)),
+                    android.widget.Toast.LENGTH_LONG).show();
+                return true;
+            });
+        }
         m.add("EIRP estimate…").setOnMenuItemClickListener(i -> { showEirpEstimatorDialog(); return true; });
-        // Master phone (with dongle): broadcast a hardcoded SSID so a SECOND phone
-        // (no dongle, ~2 m away) can EIRP-estimate this dongle's output.
-        m.add(vrxBeaconOn ? "VRX beacon (cal): ON — tap to stop" : "VRX beacon (cal): start")
-            .setOnMenuItemClickListener(i -> {
-                if (apfpvLinkManager == null) return true;
-                if (vrxBeaconOn) {
-                    apfpvLinkManager.stopBeaconCal(); vrxBeaconOn = false;
-                    Toast.makeText(this, "VRX beacon stopped", Toast.LENGTH_SHORT).show();
-                } else {
-                    int ch  = getSharedPreferences("pixelpilot", MODE_PRIVATE).getInt("apfpv_channel", 40);
-                    int idx = getSharedPreferences("general", MODE_PRIVATE).getInt("adaptive_tx_power", 20);
-                    vrxBeaconOn = apfpvLinkManager.startBeaconCal(VRX_CAL_SSID, ch, idx);
-                    if (vrxBeaconOn) Toast.makeText(this, String.format(java.util.Locale.US,
-                        "Beaconing \"%s\" ch%d, TX idx %d. On the 2nd phone (no dongle): EIRP estimate → pick \"%s\" → enter ~2 m.",
-                        VRX_CAL_SSID, ch, idx, VRX_CAL_SSID), Toast.LENGTH_LONG).show();
-                }
-                return true;
-            });
-        // WIP: bring the DONGLE up as a Wi-Fi AP (SoftAP) so a second device can associate — the
-        // Jaguar1 ENSWBCN software-beacon path. Uses the configured APFPV SSID+"-AP"/password/channel.
-        // Full HW beacon + client ACK needs the DEVOURER_AP_HWACK gate on (native env).
-        m.add(apModeOn ? "Dongle AP (test): ON — tap to stop" : "Dongle AP (test): start")
-            .setOnMenuItemClickListener(i -> {
-                if (apfpvLinkManager == null) return true;
-                if (apModeOn) {
-                    apfpvLinkManager.stopDongleAp(); apModeOn = false;
-                } else {
-                    String apSsid = getSharedPreferences("pixelpilot", MODE_PRIVATE)
-                            .getString("apfpv_ssid", "OpenIPC") + "-AP";
-                    String apPass = getSharedPreferences("pixelpilot", MODE_PRIVATE)
-                            .getString("apfpv_pass", "12345678");
-                    int ch = getSharedPreferences("pixelpilot", MODE_PRIVATE).getInt("apfpv_channel", 40);
-                    apModeOn = apfpvLinkManager.startDongleAp(apSsid, ch, apPass);
-                    if (apModeOn) Toast.makeText(this, "Dongle AP \"" + apSsid + "\" ch" + ch
-                            + " — scan for it on a 2nd device to test association", Toast.LENGTH_LONG).show();
-                }
-                return true;
-            });
-        m.add("Reconnect").setOnMenuItemClickListener(i -> {
-            if (apfpvLinkManager != null) apfpvLinkManager.refreshAdapters(); return true; });
+        if (linkMode == LinkModeCoordinator.Mode.APFPV) {
+            // Master phone (with dongle): broadcast a hardcoded SSID so a SECOND phone
+            // (no dongle, ~2 m away) can EIRP-estimate this dongle's output.
+            m.add(vrxBeaconOn ? "VRX beacon (cal): ON — tap to stop" : "VRX beacon (cal): start")
+                .setOnMenuItemClickListener(i -> {
+                    if (apfpvLinkManager == null) return true;
+                    if (vrxBeaconOn) {
+                        apfpvLinkManager.stopBeaconCal(); vrxBeaconOn = false;
+                        Toast.makeText(this, "VRX beacon stopped", Toast.LENGTH_SHORT).show();
+                    } else {
+                        int ch  = getSharedPreferences("pixelpilot", MODE_PRIVATE).getInt("apfpv_channel", 40);
+                        int idx = getSharedPreferences("general", MODE_PRIVATE).getInt("adaptive_tx_power", 20);
+                        vrxBeaconOn = apfpvLinkManager.startBeaconCal(VRX_CAL_SSID, ch, idx);
+                        if (vrxBeaconOn) Toast.makeText(this, String.format(java.util.Locale.US,
+                            "Beaconing \"%s\" ch%d, TX idx %d. On the 2nd phone (no dongle): EIRP estimate → pick \"%s\" → enter ~2 m.",
+                            VRX_CAL_SSID, ch, idx, VRX_CAL_SSID), Toast.LENGTH_LONG).show();
+                    }
+                    return true;
+                });
+            // WIP: bring the DONGLE up as a Wi-Fi AP (SoftAP) so a second device can associate — the
+            // Jaguar1 ENSWBCN software-beacon path. Uses the configured APFPV SSID+"-AP"/password/channel.
+            // Full HW beacon + client ACK needs the DEVOURER_AP_HWACK gate on (native env).
+            m.add(apModeOn ? "Dongle AP (test): ON — tap to stop" : "Dongle AP (test): start")
+                .setOnMenuItemClickListener(i -> {
+                    if (apfpvLinkManager == null) return true;
+                    if (apModeOn) {
+                        apfpvLinkManager.stopDongleAp(); apModeOn = false;
+                    } else {
+                        String apSsid = getSharedPreferences("pixelpilot", MODE_PRIVATE)
+                                .getString("apfpv_ssid", "OpenIPC") + "-AP";
+                        String apPass = getSharedPreferences("pixelpilot", MODE_PRIVATE)
+                                .getString("apfpv_pass", "12345678");
+                        int ch = getSharedPreferences("pixelpilot", MODE_PRIVATE).getInt("apfpv_channel", 40);
+                        apModeOn = apfpvLinkManager.startDongleAp(apSsid, ch, apPass);
+                        if (apModeOn) Toast.makeText(this, "Dongle AP \"" + apSsid + "\" ch" + ch
+                                + " — scan for it on a 2nd device to test association", Toast.LENGTH_LONG).show();
+                    }
+                    return true;
+                });
+            m.add("Reconnect").setOnMenuItemClickListener(i -> {
+                if (apfpvLinkManager != null) apfpvLinkManager.refreshAdapters(); return true; });
+        }
         // Auto A-MPDU: the app pushes rtw_ampdu_enable to the VTX to match the active client —
         // dongle→OFF (can't emit compressed BlockAck; A-MPDU-on collapses it to ~2 Mbps),
         // phone-Wi-Fi→ON (can BlockAck; aggregation → ~30 Mbps). Toggle to leave the VTX as-is.
@@ -1368,7 +1377,9 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
                 : (apfpvLinkManager != null ? apfpvLinkManager.statusLine() : "—");
         m.add("Status: " + apfpvStatus).setEnabled(false);
         m.add("RSSI: " + (apfpvLink != null ? apfpvLink.getRssi() : -99) + " dBm").setEnabled(false);
-        if (apfpvLinkManager != null) {
+        // Adapter picker: only meaningful with a dongle to pick among (WlxAdapters enumerates
+        // USB Wi-Fi adapters); phone-Wi-Fi mode has none.
+        if (linkMode == LinkModeCoordinator.Mode.APFPV && apfpvLinkManager != null) {
             com.openipc.pixelpilot.apfpv.WlxAdapters wlx = apfpvLinkManager.adapters();
             if (wlx.count() > 1)
                 for (com.openipc.pixelpilot.apfpv.WlxAdapters.Adapter a : wlx.all())
@@ -1385,34 +1396,38 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         // PRIMARY (lowest 20 MHz channel) + the width; legalApfpvChannel(primary,bw) then
         // reproduces the AP's exact secondary-offset/center. Labels match the WebUI 1:1 so
         // you pick the SAME string on both ends. Legal DE 5.2 GHz UNII-1 (5170-5250) only.
-        SubMenu chMenu = popup.getMenu().addSubMenu("APFPV Channel/Width");
-        int curCh = getSharedPreferences("pixelpilot", MODE_PRIVATE).getInt("apfpv_channel", 40);
-        int curBw = getSharedPreferences("pixelpilot", MODE_PRIVATE).getInt("apfpv_bandwidth", 20);
-        chMenu.add("Current: ch" + curCh + " · " + curBw + " MHz").setEnabled(false);
-        final int[][] apfpvRanges = {
-            {36, 20}, {40, 20}, {44, 20}, {48, 20},   // 20 MHz singles
-            {36, 40}, {44, 40},                        // 40 MHz pairs: 36_40, 44_48 (primary = lower)
-            {36, 80},                                  // 80 MHz quad: 36_48 (primary 36)
-        };
-        final String[] apfpvRangeLabels = {
-            "36 (20 MHz)", "40 (20 MHz)", "44 (20 MHz)", "48 (20 MHz)",
-            "36_40 (40 MHz)", "44_48 (40 MHz)", "36_48 (80 MHz)",
-        };
-        for (int r = 0; r < apfpvRanges.length; r++) {
-            final int primary = apfpvRanges[r][0], bw = apfpvRanges[r][1];
-            chMenu.add(apfpvRangeLabels[r]).setOnMenuItemClickListener(i -> {
-                getSharedPreferences("pixelpilot", MODE_PRIVATE).edit()
-                    .putInt("apfpv_channel", primary).putInt("apfpv_bandwidth", bw).apply();
-                if (apfpvLinkManager != null) {
-                    apfpvLinkManager.setChannel(primary);
-                    apfpvLinkManager.setBandwidth(bw);
-                    apfpvLinkManager.refreshAdapters();   // reconnect to apply
-                }
-                Toast.makeText(this, String.format(java.util.Locale.US,
-                    "APFPV → primary ch%d · %d MHz. Set the SAME range on the air WebUI. Reconnecting…",
-                    primary, bw), Toast.LENGTH_LONG).show();
-                return true;
-            });
+        // Dongle-station only: it drives apfpvLinkManager.setChannel/setBandwidth directly.
+        // Phone-Wi-Fi follows the AP's channel/CSA via Android's own Wi-Fi stack — no arming.
+        if (linkMode == LinkModeCoordinator.Mode.APFPV) {
+            SubMenu chMenu = popup.getMenu().addSubMenu("APFPV Channel/Width");
+            int curCh = getSharedPreferences("pixelpilot", MODE_PRIVATE).getInt("apfpv_channel", 40);
+            int curBw = getSharedPreferences("pixelpilot", MODE_PRIVATE).getInt("apfpv_bandwidth", 20);
+            chMenu.add("Current: ch" + curCh + " · " + curBw + " MHz").setEnabled(false);
+            final int[][] apfpvRanges = {
+                {36, 20}, {40, 20}, {44, 20}, {48, 20},   // 20 MHz singles
+                {36, 40}, {44, 40},                        // 40 MHz pairs: 36_40, 44_48 (primary = lower)
+                {36, 80},                                  // 80 MHz quad: 36_48 (primary 36)
+            };
+            final String[] apfpvRangeLabels = {
+                "36 (20 MHz)", "40 (20 MHz)", "44 (20 MHz)", "48 (20 MHz)",
+                "36_40 (40 MHz)", "44_48 (40 MHz)", "36_48 (80 MHz)",
+            };
+            for (int r = 0; r < apfpvRanges.length; r++) {
+                final int primary = apfpvRanges[r][0], bw = apfpvRanges[r][1];
+                chMenu.add(apfpvRangeLabels[r]).setOnMenuItemClickListener(i -> {
+                    getSharedPreferences("pixelpilot", MODE_PRIVATE).edit()
+                        .putInt("apfpv_channel", primary).putInt("apfpv_bandwidth", bw).apply();
+                    if (apfpvLinkManager != null) {
+                        apfpvLinkManager.setChannel(primary);
+                        apfpvLinkManager.setBandwidth(bw);
+                        apfpvLinkManager.refreshAdapters();   // reconnect to apply
+                    }
+                    Toast.makeText(this, String.format(java.util.Locale.US,
+                        "APFPV → primary ch%d · %d MHz. Set the SAME range on the air WebUI. Reconnecting…",
+                        primary, bw), Toast.LENGTH_LONG).show();
+                    return true;
+                });
+            }
         }
 
         // aalink keys — each its OWN top-level submenu, exactly like Channel/Bandwidth
