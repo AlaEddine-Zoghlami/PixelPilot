@@ -1830,7 +1830,10 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         autoDvr.setOnMenuItemClickListener(item -> {
             boolean en = !getDvrAuto();
             item.setChecked(en); setDvrAuto(en);
-            if (en) startAutoDvrWatcher(); else stopAutoDvrWatcher();
+            // Auto DVR is ARM-driven: record exactly the armed window. The stream-presence watcher
+            // still runs, but only as a fallback for setups with no arm telemetry (see below).
+            if (en) { startAutoDvrWatcher(); startArmWatcher(); }
+            else    { stopAutoDvrWatcher();  stopArmWatcher();  }
             item.setShowAsAction(MenuItem.SHOW_AS_ACTION_COLLAPSE_ACTION_VIEW);
             item.setActionView(new View(this));
             return false;
@@ -2389,6 +2392,36 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
     public boolean getDvrAuto() { return getSharedPreferences("general", Context.MODE_PRIVATE).getBoolean("dvr_auto", false); }
     public void setDvrAuto(boolean e) { getSharedPreferences("general", Context.MODE_PRIVATE).edit().putBoolean("dvr_auto", e).apply(); }
 
+    // Auto DVR is ARM-DRIVEN: with it enabled, arming the FC starts recording and disarming stops
+    // it, so a clip is exactly one flight instead of the whole powered-on session. Requires msposd
+    // on the VTX to run with `-d -o <thisDevice>:14550` — see MspArmListener for why `-d` is
+    // mandatory (without it the FC only pushes pre-rendered OSD text, with no arm bit on the wire).
+    // If no arm telemetry ever arrives (msposd not configured that way), the stream-presence
+    // watcher below transparently takes over so Auto DVR still does something useful.
+    private MspArmListener mspArmListener;
+    private void startArmWatcher() {
+        if (mspArmListener != null) return;
+        mspArmListener = new MspArmListener(MspArmListener.DEFAULT_PORT, armed -> runOnUiThread(() -> {
+            if (!getDvrAuto()) return;
+            if (armed) {
+                // A manual Stop during a previous flight must not block the next arm: an arm event
+                // is an explicit new intent to record, so clear the manual-override latch.
+                userStoppedDvr = false;
+                if (dvrFd == null) { Uri u = openDvrFile(); if (u != null) startDvr(u); }
+            } else {
+                if (dvrFd != null) stopDvr();
+            }
+        }));
+        mspArmListener.start();
+    }
+    private void stopArmWatcher() {
+        if (mspArmListener != null) { mspArmListener.stop(); mspArmListener = null; }
+    }
+    /** True once real FC arm telemetry has been seen — then arm owns the start/stop decision. */
+    private boolean haveArmTelemetry() {
+        return mspArmListener != null && mspArmListener.isArmed() != null;
+    }
+
     // Auto-DVR: ~1 Hz watcher of the live stream (decoder W/H + fps). Starts recording when a
     // stream appears, auto-stops ~3s after it drops (device/remote off). A manual Stop sets
     // userStoppedDvr so it won't immediately re-arm; that clears when the stream drops + returns.
@@ -2405,7 +2438,12 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
                     boolean live = videoPlayer != null && videoPlayer.getVideoWidth() > 0 && videoPlayer.getVideoFps() > 0;
                     if (live) {
                         autoNoStream = 0;
-                        if (dvrFd == null && !userStoppedDvr) { Uri u = openDvrFile(); if (u != null) startDvr(u); }
+                        // Once real arm telemetry exists, ARM owns the start decision — don't also
+                        // start on mere stream presence, or the two triggers fight and we'd record
+                        // the whole powered-on session instead of just the armed window. With no arm
+                        // telemetry this is the fallback that keeps Auto DVR useful. The
+                        // stream-drop auto-stop below runs as a safety net either way.
+                        if (dvrFd == null && !userStoppedDvr && !haveArmTelemetry()) { Uri u = openDvrFile(); if (u != null) startDvr(u); }
                     } else if (++autoNoStream >= 3) {
                         if (dvrFd != null) stopDvr();   // stream gone -> auto-stop
                         userStoppedDvr = false;          // a returning stream may auto-start again
@@ -2533,6 +2571,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
     @Override
     protected void onStop() {
         if (MAVLINK_ENABLED) MavlinkNative.nativeStop(this);
+        stopArmWatcher();   // release the MSP UDP socket while backgrounded
         handler.removeCallbacks(runnable);
         unregisterReceivers();
         // All transports + video already stopped in onPause; don't double-disconnect
@@ -2587,7 +2626,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         videoPlayer.startAudio();
         // Flush stale frames at the menu-configured threshold (default 60ms).
         videoPlayer.setVideoFlushMs(getVideoFlushMs(this));
-        if (getDvrAuto()) startAutoDvrWatcher();
+        if (getDvrAuto()) { startAutoDvrWatcher(); startArmWatcher(); }
 
         osdManager.restoreOSDConfig();
 
