@@ -2375,15 +2375,15 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
 
     private void startAalinkStats() {
         if (aalinkStats != null) return;
-        // DEFAULT OFF. On the dongle path every fetch is a TCP SYN pushed through the TUN into
-        // sendIpPacket -> sendStationFrameSync, which does blocking USB register polling on the
-        // same pipe video RX uses -- and the TUN uplink is currently dead (ping over tun0 is 100%
-        // loss), so the SYNs retransmit and never succeed. That starves RX, which is why the app
-        // went unresponsive on the dongle while phone-Wi-Fi (where this never leaves the OS) was
-        // fine. Enable deliberately once the uplink works:
-        //   adb shell settings put global pixelpilot_aalink_stats 1
+        // DEFAULT ON. This was briefly defaulted off while diagnosing dongle unresponsiveness, but
+        // testing cleared it: the symptom persisted with both this and the OSD disabled, and the
+        // real cause turned out to be the supervisor's diagnostic USB control-reads blocking the
+        // loop that sends the ARP keepalive. Kept switchable for future isolation:
+        //   adb shell settings put global pixelpilot_aalink_stats 0
+        // Note the fetch still needs the TUN uplink; while that is down it simply backs off to a
+        // 60 s retry and reports "--" rather than costing anything.
         try {
-            if (android.provider.Settings.Global.getInt(getContentResolver(), "pixelpilot_aalink_stats", 0) == 0) {
+            if (android.provider.Settings.Global.getInt(getContentResolver(), "pixelpilot_aalink_stats", 1) == 0) {
                 android.util.Log.i("AalinkStats", "disabled (pixelpilot_aalink_stats=0); TUN uplink required");
                 return;
             }
