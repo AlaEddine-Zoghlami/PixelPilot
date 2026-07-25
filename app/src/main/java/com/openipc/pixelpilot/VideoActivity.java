@@ -2366,6 +2366,91 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
     // mandatory (without it the FC only pushes pre-rendered OSD text, with no arm bit on the wire).
     // If no arm telemetry ever arrives (msposd not configured that way), the stream-presence
     // watcher below transparently takes over so Auto DVR still does something useful.
+    // aalink's status line, drawn top-centre where the VTX overlay used to put it. Added in code
+    // rather than the layout so it needs no XML change and sits above the SurfaceView.
+    private AalinkStats aalinkStats;
+    private android.widget.TextView aalinkView, aalinkViewR;
+    private android.os.Handler aalinkUi;
+    private Runnable aalinkTick;
+
+    private void startAalinkStats() {
+        if (aalinkStats != null) return;
+        buildAalinkViews();
+        aalinkStats = new AalinkStats(AalinkStats.DEFAULT_HOST);
+        aalinkStats.start();
+        aalinkUi = new android.os.Handler(android.os.Looper.getMainLooper());
+        aalinkTick = new Runnable() {
+            @Override public void run() {
+                if (aalinkStats != null) {
+                    String txt = aalinkStats.line();
+                    if (aalinkView != null) aalinkView.setText(txt);
+                    if (aalinkViewR != null) aalinkViewR.setText(txt);
+                }
+                if (aalinkUi != null) aalinkUi.postDelayed(this, 1000);
+            }
+        };
+        aalinkUi.post(aalinkTick);
+    }
+
+    /** In VR the screen is split per eye, so a single centred line would land in the gap between
+     *  them. Draw one line per half instead, each centred within its own half; non-VR keeps one
+     *  centred line. Views are added with addContentView so this works whatever the layout root is
+     *  (an earlier version required a FrameLayout root and silently did nothing otherwise). */
+    private void buildAalinkViews() {
+        removeAalinkViews();
+        boolean vr = isVRMode;
+        aalinkView = makeAalinkLabel();
+        if (!vr) {
+            android.widget.FrameLayout.LayoutParams lp = new android.widget.FrameLayout.LayoutParams(
+                    android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
+                    android.widget.FrameLayout.LayoutParams.WRAP_CONTENT);
+            lp.gravity = android.view.Gravity.TOP | android.view.Gravity.CENTER_HORIZONTAL;
+            lp.topMargin = 8;
+            addContentView(aalinkView, lp);
+        } else {
+            int half = getResources().getDisplayMetrics().widthPixels / 2;
+            android.widget.FrameLayout.LayoutParams l = new android.widget.FrameLayout.LayoutParams(
+                    half, android.widget.FrameLayout.LayoutParams.WRAP_CONTENT);
+            l.gravity = android.view.Gravity.TOP | android.view.Gravity.START;
+            l.topMargin = 8;
+            addContentView(aalinkView, l);
+            aalinkViewR = makeAalinkLabel();
+            android.widget.FrameLayout.LayoutParams r = new android.widget.FrameLayout.LayoutParams(
+                    half, android.widget.FrameLayout.LayoutParams.WRAP_CONTENT);
+            r.gravity = android.view.Gravity.TOP | android.view.Gravity.END;
+            r.topMargin = 8;
+            addContentView(aalinkViewR, r);
+        }
+    }
+
+    private android.widget.TextView makeAalinkLabel() {
+        android.widget.TextView t = new android.widget.TextView(this);
+        t.setTextColor(0xFF00FF66);
+        t.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 12);
+        t.setBackgroundColor(0x80000000);
+        t.setPadding(12, 4, 12, 4);
+        t.setGravity(android.view.Gravity.CENTER_HORIZONTAL);   // centre within its half in VR
+        return t;
+    }
+
+    private void removeAalinkViews() {
+        for (android.widget.TextView v : new android.widget.TextView[]{ aalinkView, aalinkViewR }) {
+            if (v != null && v.getParent() instanceof android.view.ViewGroup)
+                ((android.view.ViewGroup) v.getParent()).removeView(v);
+        }
+        aalinkView = null; aalinkViewR = null;
+    }
+
+    /** Re-lay the line when VR mode is toggled, so it moves to/from the per-eye positions. */
+    public void refreshAalinkLayout() { if (aalinkStats != null) buildAalinkViews(); }
+
+    private void stopAalinkStats() {
+        removeAalinkViews();
+        if (aalinkUi != null && aalinkTick != null) aalinkUi.removeCallbacks(aalinkTick);
+        aalinkUi = null; aalinkTick = null;
+        if (aalinkStats != null) { aalinkStats.stop(); aalinkStats = null; }
+    }
+
     private MspArmListener mspArmListener;
     private void startArmWatcher() {
         if (mspArmListener != null) return;
@@ -2540,6 +2625,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
     protected void onStop() {
         if (MAVLINK_ENABLED) MavlinkNative.nativeStop(this);
         stopArmWatcher();   // release the MSP UDP socket while backgrounded
+        stopAalinkStats();
         handler.removeCallbacks(runnable);
         unregisterReceivers();
         // All transports + video already stopped in onPause; don't double-disconnect
@@ -2595,6 +2681,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         // Flush stale frames at the menu-configured threshold (default 60ms).
         videoPlayer.setVideoFlushMs(getVideoFlushMs(this));
         if (getDvrAuto()) { startAutoDvrWatcher(); startArmWatcher(); }
+        startAalinkStats();
 
         osdManager.restoreOSDConfig();
 
