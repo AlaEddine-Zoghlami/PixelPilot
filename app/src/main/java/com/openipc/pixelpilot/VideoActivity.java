@@ -2440,6 +2440,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
             lp.gravity = android.view.Gravity.TOP | android.view.Gravity.CENTER_HORIZONTAL;
             lp.topMargin = 8;
             addContentView(aalinkView, lp);
+            aalinkView.bringToFront();
         } else {
             int half = getResources().getDisplayMetrics().widthPixels / 2;
             android.widget.FrameLayout.LayoutParams l = new android.widget.FrameLayout.LayoutParams(
@@ -2463,6 +2464,10 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         t.setBackgroundColor(0x80000000);
         t.setPadding(12, 4, 12, 4);
         t.setGravity(android.view.Gravity.CENTER_HORIZONTAL);   // centre within its half in VR
+        // Force above the video SurfaceView; otherwise the overlay can be composited behind it and
+        // simply never appear.
+        t.setElevation(100f);
+        t.setTranslationZ(100f);
         return t;
     }
 
@@ -2490,8 +2495,11 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
     // with no changes to the GL or DVR plumbing.
     private MspOsdCanvas osdCanvas;
     private android.widget.ImageView osdView, osdViewR;
-    private android.graphics.Bitmap osdBitmap;
+    private android.graphics.Bitmap osdBitmap, osdBitmapBack;   // double-buffered
     private int osdLastGen = -1;
+    private android.os.HandlerThread osdThread;
+    private android.os.Handler osdHandler;
+    private volatile boolean osdRenderInFlight = false;
 
     private void startGroundOsd() {
         if (osdCanvas != null) return;
@@ -2511,13 +2519,26 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         if (w <= 0 || h <= 0) return;
         // One shared bitmap: both eyes show the same overlay, so render once and display twice.
         osdBitmap = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888);
+        osdBitmapBack = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888);
+        if (osdThread == null) {
+            osdThread = new android.os.HandlerThread("OsdRender");
+            osdThread.start();
+            osdHandler = new android.os.Handler(osdThread.getLooper());
+        }
         osdView = new android.widget.ImageView(this);
+        // Must not intercept input: it covers the whole content area, above the controls.
+        osdView.setClickable(false); osdView.setFocusable(false);
+        osdView.setElevation(99f); osdView.setTranslationZ(99f);   // above video, below the text line
+        osdView.setScaleType(android.widget.ImageView.ScaleType.FIT_XY);
         osdView.setImageBitmap(osdBitmap);
         android.widget.FrameLayout.LayoutParams lp = new android.widget.FrameLayout.LayoutParams(w, h);
         lp.gravity = vr ? (android.view.Gravity.TOP | android.view.Gravity.START) : android.view.Gravity.CENTER;
         addContentView(osdView, lp);
         if (vr) {
             osdViewR = new android.widget.ImageView(this);
+            osdViewR.setClickable(false); osdViewR.setFocusable(false);
+            osdViewR.setElevation(99f); osdViewR.setTranslationZ(99f);
+            osdViewR.setScaleType(android.widget.ImageView.ScaleType.FIT_XY);
             osdViewR.setImageBitmap(osdBitmap);
             android.widget.FrameLayout.LayoutParams rp = new android.widget.FrameLayout.LayoutParams(w, h);
             rp.gravity = android.view.Gravity.TOP | android.view.Gravity.END;
@@ -2536,18 +2557,38 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
     private void stopGroundOsd() {
         removeOsdViews();
         if (mspArmListener != null) mspArmListener.osdCanvas = null;
-        osdCanvas = null; osdBitmap = null;
+        if (osdThread != null) { osdThread.quitSafely(); osdThread = null; osdHandler = null; }
+        osdRenderInFlight = false;
+        osdCanvas = null; osdBitmap = null; osdBitmapBack = null;
     }
 
     /** Re-rasterise only when the canvas actually changed (~10 Hz), not per UI tick. */
     private void tickGroundOsd() {
-        if (osdCanvas == null || osdBitmap == null || !osdCanvas.ready()) return;
+        if (osdCanvas == null || osdBitmapBack == null || !osdCanvas.ready()) return;
+        if (osdHandler == null || osdRenderInFlight) return;
         int g = osdCanvas.generation();
         if (g == osdLastGen) return;
         osdLastGen = g;
-        osdCanvas.render(osdBitmap);
-        if (osdView != null) osdView.invalidate();
-        if (osdViewR != null) osdViewR.invalidate();
+        // Rasterise OFF the UI thread. Doing it inline caused an ANR: a full-screen erase plus ~68
+        // scaled drawBitmap calls at 5 Hz on the main thread, while also contending with the MSP
+        // socket thread for the canvas lock.
+        osdRenderInFlight = true;
+        osdHandler.post(() -> {
+            try {
+                osdCanvas.render(osdBitmapBack);
+            } catch (Throwable t) {
+                android.util.Log.w("MspOsd", "render failed: " + t);
+            }
+            runOnUiThread(() -> {
+                // Swap buffers so the renderer never draws into the bitmap the views are showing.
+                android.graphics.Bitmap shown = osdBitmap;
+                osdBitmap = osdBitmapBack;
+                osdBitmapBack = shown;
+                if (osdView != null) osdView.setImageBitmap(osdBitmap);
+                if (osdViewR != null) osdViewR.setImageBitmap(osdBitmap);
+                osdRenderInFlight = false;
+            });
+        });
     }
 
     private MspArmListener mspArmListener;
@@ -2595,7 +2636,11 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
                         // the whole powered-on session instead of just the armed window. With no arm
                         // telemetry this is the fallback that keeps Auto DVR useful. The
                         // stream-drop auto-stop below runs as a safety net either way.
-                        if (dvrFd == null && !userStoppedDvr && !haveArmTelemetry()) { Uri u = openDvrFile(); if (u != null) startDvr(u); }
+                        // Auto DVR follows ARM only. Starting on mere stream presence meant that
+                        // whenever arm telemetry was absent (msposd not forwarding, link down, VPN
+                        // bridge off) recording began as soon as video appeared, which is not what
+                        // "auto record on arm" should do. The stream-drop auto-stop below is kept
+                        // as a safety net so a recording can never be left running forever.
                     } else if (++autoNoStream >= 3) {
                         if (dvrFd != null) stopDvr();   // stream gone -> auto-stop
                         userStoppedDvr = false;          // a returning stream may auto-start again

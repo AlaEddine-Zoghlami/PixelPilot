@@ -94,7 +94,7 @@ public final class MspOsdCanvas {
     }
 
     /** Grid the FC is actually addressing: 53x20 (SD) or 50x18 (HD). */
-    private synchronized int[] grid() {
+    private int[] grid0() {
         if (maxCol < 0) return new int[]{ 53, 20 };
         return new int[]{ maxCol >= 50 ? 53 : 50, maxRow >= 18 ? 20 : 18 };
     }
@@ -104,10 +104,21 @@ public final class MspOsdCanvas {
      * TARGET bitmap. Cell size must come from the output, not the atlas, or a higher-resolution
      * font shrinks the whole overlay instead of just sharpening it.
      */
-    public synchronized void render(Bitmap out) {
+    public void render(Bitmap out) {
         if (atlas == null || out == null) return;
-        int[] g = grid();
-        int cols = g[0], rows = g[1];
+        // Copy the published canvas under the lock, then rasterise WITHOUT holding it. Rasterising
+        // inside the lock made the renderer contend with feed() on the MSP socket thread.
+        final byte[][] sg = new byte[MAX_ROWS][MAX_COLS];
+        final byte[][] sp = new byte[MAX_ROWS][MAX_COLS];
+        int cols, rows;
+        synchronized (this) {
+            for (int r = 0; r < MAX_ROWS; r++) {
+                System.arraycopy(fGlyph[r], 0, sg[r], 0, MAX_COLS);
+                System.arraycopy(fPage[r], 0, sp[r], 0, MAX_COLS);
+            }
+            int[] g = grid0();
+            cols = g[0]; rows = g[1];
+        }
         int W = out.getWidth(), H = out.getHeight();
         int cellW = W / cols, cellH = H / rows;
         if (cellW <= 0 || cellH <= 0) return;
@@ -117,9 +128,9 @@ public final class MspOsdCanvas {
         out.eraseColor(0);                              // transparent
         Rect src = new Rect(), dst = new Rect();
         for (int r = 0; r < rows; r++) for (int c = 0; c < cols; c++) {
-            int gl = fGlyph[r][c] & 0xFF;
+            int gl = sg[r][c] & 0xFF;
             if (gl == 0) continue;                      // empty cell
-            int p = fPage[r][c] & 0x03;
+            int p = sp[r][c] & 0x03;
             src.set(p * glyphW, gl * glyphH, p * glyphW + glyphW, gl * glyphH + glyphH);
             if (src.bottom > atlas.getHeight()) continue;
             dst.set(xoff + c * cellW, yoff + r * cellH,
