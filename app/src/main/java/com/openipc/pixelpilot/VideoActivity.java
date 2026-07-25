@@ -672,8 +672,14 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         setupColortransSubMenu(popup);
 
         // Route VTX (192.168.0.1) SSH/HTTP through the dongle so menu settings apply on the
-        // dongle path (not just phone-Wi-Fi). No-op unless the dongle link is up.
-        setupVtxRouteSubMenu(popup);
+        // dongle path. APFPV dongle-station only: ApfpvVpnService bridges through
+        // ApfpvStation's CCMP link (ApfpvStaLink.leaseIp()) specifically -- meaningless in
+        // WFB-ng mode (different link, its own VpnService starts automatically, no manual
+        // toggle) and in phone-Wi-Fi mode (no dongle; the phone's own Wi-Fi already routes
+        // to the VTX directly).
+        if (linkMode == LinkModeCoordinator.Mode.APFPV) {
+            setupVtxRouteSubMenu(popup);
+        }
 
         // Video flush (ms) — MediaTek only (the stale-frame flush is on the MTK decode path).
         if (isMtkDevice()) {
@@ -695,8 +701,12 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         // Recording submenu
         setupRecordingSubMenu(popup);
 
-        // Drone submenu
-        setupDroneSubMenu(popup);
+        // Drone submenu — opens the drone's web config UI at the wfb-ng tunnel's fixed
+        // gateway address (10.5.0.10); APFPV addresses the VTX at 192.168.0.1/DHCP-leased
+        // instead, so this is unreachable and WFB-ng-only.
+        if (!apfpvMode) {
+            setupDroneSubMenu(popup);
+        }
 
         // UDP Forwarding submenu
         setupUdpForwardingSubMenu(popup);
@@ -947,7 +957,11 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
             if (devIdx >= 0) adaptiveTxPower = devIdx;
         }
 
-        // Adaptive link Enable option
+        // Adaptive link Enable option -- WFB-ng's own adaptive-FEC/rate mechanism
+        // (nativeSetAdaptiveLinkEnabled on the WfbNgLink instance); APFPV has no
+        // equivalent concept (its link-quality/rate adaptation runs through aalink over
+        // SSH instead), so this toggle was previously a silent no-op in APFPV modes.
+        if (linkMode == LinkModeCoordinator.Mode.WFB) {
         MenuItem adaptiveEnable = adaptiveMenu.add("Enable");
         adaptiveEnable.setCheckable(true);
         adaptiveEnable.setChecked(adaptiveEnabled);
@@ -961,6 +975,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
             wfbLink.nativeSetAdaptiveLinkEnabled(newState);
             return true;
         });
+        }
 
         // Adaptive link Power submenu
         SubMenu powerSubMenu = adaptiveMenu.addSubMenu("Power");
@@ -1031,7 +1046,10 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
             return true;
         });
 
-        // Adaptive use FEC submenu
+        // Adaptive use FEC submenu -- FEC/LDPC/STBC are wfb-ng's own PHY/FEC knobs
+        // (TxArgs.fec/ldpc/stbc in WfbngLink.cpp); APFPV has no app-side FEC or these
+        // PHY toggles, so gate the whole block to WFB-ng mode.
+        if (linkMode == LinkModeCoordinator.Mode.WFB) {
         boolean fecEnabled = prefs.getBoolean("custom_fec_enabled", true);
 
         MenuItem fecEnable = adaptiveMenu.add("FEC");
@@ -1083,6 +1101,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
             showFecThresholdsDialog();
             return true;
         });
+        }
     }
 
     // Show dialog to configure FEC thresholds for all levels
