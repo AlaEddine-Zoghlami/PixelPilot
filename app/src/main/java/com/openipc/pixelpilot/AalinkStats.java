@@ -35,6 +35,7 @@ public final class AalinkStats {
     // -1 means "not known yet" so callers can render "--" rather than a misleading 0.
     public volatile int up = -1, down = -1, mcs = -1, kbps = -1, bw = -1, ch = -1, txpwr = -1, q = -1;
     private volatile long lastOkMs = 0;
+    private int fails = 0;
 
     public AalinkStats(String host) {
         this.url = "http://" + host + "/aalink_ext.msg";
@@ -71,12 +72,20 @@ public final class AalinkStats {
                     while ((ln = r.readLine()) != null) sb.append(ln).append('\n');
                 }
                 if (sb.length() > 0) { parse(sb.toString()); lastOkMs = System.currentTimeMillis(); }
+                fails = 0;
             } catch (Exception ignored) {
-                // VTX unreachable / bridge down — keep the last values and retry.
+                // VTX unreachable / bridge down — keep the last values and back off.
+                if (fails < 60) fails++;
             } finally {
                 if (c != null) c.disconnect();
             }
-            try { Thread.sleep(1000); } catch (InterruptedException e) { break; }
+            // BACK OFF ON FAILURE. On the dongle path this request traverses the APFPV IP bridge /
+            // TUN, i.e. the same link that carries video. Retrying every second while it is down
+            // pushed steady connection attempts into that TX path and loaded the CPU the RX worker
+            // needs, which showed up as the app becoming unresponsive on dongle while phone-Wi-Fi
+            // (where the request never leaves the OS) was fine. 1s when healthy, up to 15s when not.
+            long delay = (fails == 0) ? 1000L : Math.min(15000L, 1000L * (1L << Math.min(fails, 4)));
+            try { Thread.sleep(delay); } catch (InterruptedException e) { break; }
         }
         Log.i(TAG, "stopped");
     }
