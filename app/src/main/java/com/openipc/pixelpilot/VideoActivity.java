@@ -701,12 +701,10 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         // Recording submenu
         setupRecordingSubMenu(popup);
 
-        // Drone submenu — opens the drone's web config UI at the wfb-ng tunnel's fixed
-        // gateway address (10.5.0.10); APFPV addresses the VTX at 192.168.0.1/DHCP-leased
-        // instead, so this is unreachable and WFB-ng-only.
-        if (!apfpvMode) {
-            setupDroneSubMenu(popup);
-        }
+        // Drone submenu — opens the drone's web config UI. startBrowser() picks the right
+        // host per mode (wfb-ng's tunnel gateway 10.5.0.10, or APFPV's VTX address
+        // 192.168.0.1), so this is relevant in every mode.
+        setupDroneSubMenu(popup);
 
         // UDP Forwarding submenu
         setupUdpForwardingSubMenu(popup);
@@ -2906,7 +2904,10 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         WebView view = new WebView(this);
         view.setWebViewClient(new WebViewClient());
         view.getSettings().setJavaScriptEnabled(true);
-        view.loadUrl("10.5.0.10");
+        // wfb-ng addresses the VTX at its tunnel's fixed gateway (10.5.0.10); APFPV (dongle
+        // or phone-Wi-Fi) addresses it directly at 192.168.0.1, same host AirSshClient uses
+        // (useApfpvHost()).
+        view.loadUrl(apfpvMode ? "http://192.168.0.1" : "http://10.5.0.10");
 
         Dialog dialog = new Dialog(this);
         dialog.setContentView(view);
