@@ -2375,6 +2375,19 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
 
     private void startAalinkStats() {
         if (aalinkStats != null) return;
+        // DEFAULT OFF. On the dongle path every fetch is a TCP SYN pushed through the TUN into
+        // sendIpPacket -> sendStationFrameSync, which does blocking USB register polling on the
+        // same pipe video RX uses -- and the TUN uplink is currently dead (ping over tun0 is 100%
+        // loss), so the SYNs retransmit and never succeed. That starves RX, which is why the app
+        // went unresponsive on the dongle while phone-Wi-Fi (where this never leaves the OS) was
+        // fine. Enable deliberately once the uplink works:
+        //   adb shell settings put global pixelpilot_aalink_stats 1
+        try {
+            if (android.provider.Settings.Global.getInt(getContentResolver(), "pixelpilot_aalink_stats", 0) == 0) {
+                android.util.Log.i("AalinkStats", "disabled (pixelpilot_aalink_stats=0); TUN uplink required");
+                return;
+            }
+        } catch (Throwable ignored) { return; }
         buildAalinkViews();
         aalinkStats = new AalinkStats(AalinkStats.DEFAULT_HOST);
         aalinkStats.start();
@@ -2471,6 +2484,17 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
 
     private void startGroundOsd() {
         if (osdCanvas != null) return;
+        // Runtime kill-switch, settable without a rebuild or UI:
+        //   adb shell settings put global pixelpilot_ground_osd 0   (off)
+        // Exists because rasterising the OSD is real per-frame work and the dongle path's RX worker
+        // is known to be CPU-sensitive, so it must be possible to take this out of the picture when
+        // diagnosing video/responsiveness problems.
+        try {
+            if (android.provider.Settings.Global.getInt(getContentResolver(), "pixelpilot_ground_osd", 1) == 0) {
+                android.util.Log.i("MspOsd", "ground OSD disabled by pixelpilot_ground_osd=0");
+                return;
+            }
+        } catch (Throwable ignored) { }
         osdCanvas = new MspOsdCanvas();
         if (!osdCanvas.loadAtlas(this, "font_btfl.png")) { osdCanvas = null; return; }
         if (mspArmListener != null) mspArmListener.osdCanvas = osdCanvas;
@@ -2796,6 +2820,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         if (getDvrAuto()) { startAutoDvrWatcher(); startArmWatcher(); }
         startAalinkStats();
         startGroundOsd();
+        if (aalinkStats == null && osdCanvas == null) stopAalinkStats();   // nothing to tick
 
         osdManager.restoreOSDConfig();
 
