@@ -52,6 +52,9 @@ public final class MspArmListener {
     /** null until the first MSP_STATUS arrives, so we never fire an edge from an assumed state. */
     private Boolean lastArmed;
 
+    /** Optional: also decode MSP_DISPLAYPORT into this canvas for the ground-side OSD. */
+    public MspOsdCanvas osdCanvas;
+
     public MspArmListener(int port, ArmCallback callback) {
         this.port = port;
         this.callback = callback;
@@ -133,6 +136,9 @@ public final class MspArmListener {
             int crc = payloadLen ^ cmd;
             for (int k = 0; k < payloadLen; k++) crc ^= (b[payloadStart + k] & 0xFF);
             if ((crc & 0xFF) == (b[payloadStart + payloadLen] & 0xFF)) {
+                // The same forwarded stream also carries MSP_DISPLAYPORT: one socket feeds both
+                // arm detection and the ground-side OSD.
+                if (cmd == 182 && osdCanvas != null) osdCanvas.feed(b, payloadStart, payloadLen);
                 if ((cmd == MSP_STATUS || cmd == MSP_STATUS_EX) && payloadLen >= 10) {
                     handleStatus(b, payloadStart);
                 }

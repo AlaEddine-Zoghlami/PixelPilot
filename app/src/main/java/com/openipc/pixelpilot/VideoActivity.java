@@ -2386,7 +2386,8 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
                     if (aalinkView != null) aalinkView.setText(txt);
                     if (aalinkViewR != null) aalinkViewR.setText(txt);
                 }
-                if (aalinkUi != null) aalinkUi.postDelayed(this, 1000);
+                tickGroundOsd();
+                if (aalinkUi != null) aalinkUi.postDelayed(this, 200);   // OSD needs ~5 Hz, not 1 Hz
             }
         };
         aalinkUi.post(aalinkTick);
@@ -2442,13 +2443,79 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
     }
 
     /** Re-lay the line when VR mode is toggled, so it moves to/from the per-eye positions. */
-    public void refreshAalinkLayout() { if (aalinkStats != null) buildAalinkViews(); }
+    public void refreshAalinkLayout() { if (aalinkStats != null) buildAalinkViews(); if (osdCanvas != null) buildOsdViews(); }
 
     private void stopAalinkStats() {
         removeAalinkViews();
         if (aalinkUi != null && aalinkTick != null) aalinkUi.removeCallbacks(aalinkTick);
         aalinkUi = null; aalinkTick = null;
         if (aalinkStats != null) { aalinkStats.stop(); aalinkStats = null; }
+    }
+
+    // Ground-side Betaflight OSD, drawn from MSP_DISPLAYPORT. Rendered into an ImageView in the
+    // content layer rather than GL: that keeps VR handling identical to the aalink line (one view
+    // per eye-half) AND means captureOsdBitmap() picks it up for OSD/Raw+OSD recording for free,
+    // with no changes to the GL or DVR plumbing.
+    private MspOsdCanvas osdCanvas;
+    private android.widget.ImageView osdView, osdViewR;
+    private android.graphics.Bitmap osdBitmap;
+    private int osdLastGen = -1;
+
+    private void startGroundOsd() {
+        if (osdCanvas != null) return;
+        osdCanvas = new MspOsdCanvas();
+        if (!osdCanvas.loadAtlas(this, "font_btfl.png")) { osdCanvas = null; return; }
+        if (mspArmListener != null) mspArmListener.osdCanvas = osdCanvas;
+        buildOsdViews();
+    }
+
+    private void buildOsdViews() {
+        removeOsdViews();
+        if (osdCanvas == null) return;
+        android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
+        boolean vr = isVRMode;
+        int w = vr ? dm.widthPixels / 2 : dm.widthPixels;
+        int h = dm.heightPixels;
+        if (w <= 0 || h <= 0) return;
+        // One shared bitmap: both eyes show the same overlay, so render once and display twice.
+        osdBitmap = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888);
+        osdView = new android.widget.ImageView(this);
+        osdView.setImageBitmap(osdBitmap);
+        android.widget.FrameLayout.LayoutParams lp = new android.widget.FrameLayout.LayoutParams(w, h);
+        lp.gravity = vr ? (android.view.Gravity.TOP | android.view.Gravity.START) : android.view.Gravity.CENTER;
+        addContentView(osdView, lp);
+        if (vr) {
+            osdViewR = new android.widget.ImageView(this);
+            osdViewR.setImageBitmap(osdBitmap);
+            android.widget.FrameLayout.LayoutParams rp = new android.widget.FrameLayout.LayoutParams(w, h);
+            rp.gravity = android.view.Gravity.TOP | android.view.Gravity.END;
+            addContentView(osdViewR, rp);
+        }
+        osdLastGen = -1;
+    }
+
+    private void removeOsdViews() {
+        for (android.widget.ImageView v : new android.widget.ImageView[]{ osdView, osdViewR })
+            if (v != null && v.getParent() instanceof android.view.ViewGroup)
+                ((android.view.ViewGroup) v.getParent()).removeView(v);
+        osdView = null; osdViewR = null;
+    }
+
+    private void stopGroundOsd() {
+        removeOsdViews();
+        if (mspArmListener != null) mspArmListener.osdCanvas = null;
+        osdCanvas = null; osdBitmap = null;
+    }
+
+    /** Re-rasterise only when the canvas actually changed (~10 Hz), not per UI tick. */
+    private void tickGroundOsd() {
+        if (osdCanvas == null || osdBitmap == null || !osdCanvas.ready()) return;
+        int g = osdCanvas.generation();
+        if (g == osdLastGen) return;
+        osdLastGen = g;
+        osdCanvas.render(osdBitmap);
+        if (osdView != null) osdView.invalidate();
+        if (osdViewR != null) osdViewR.invalidate();
     }
 
     private MspArmListener mspArmListener;
@@ -2626,6 +2693,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         if (MAVLINK_ENABLED) MavlinkNative.nativeStop(this);
         stopArmWatcher();   // release the MSP UDP socket while backgrounded
         stopAalinkStats();
+        stopGroundOsd();
         handler.removeCallbacks(runnable);
         unregisterReceivers();
         // All transports + video already stopped in onPause; don't double-disconnect
@@ -2682,6 +2750,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         videoPlayer.setVideoFlushMs(getVideoFlushMs(this));
         if (getDvrAuto()) { startAutoDvrWatcher(); startArmWatcher(); }
         startAalinkStats();
+        startGroundOsd();
 
         osdManager.restoreOSDConfig();
 
