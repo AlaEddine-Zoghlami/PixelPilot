@@ -248,6 +248,20 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
 
     // Lifecycle - onCreate
 
+    private boolean hasDvrFolder() {
+        return getSharedPreferences("general", Context.MODE_PRIVATE)
+                .getString("dvr_folder_", null) != null;
+    }
+    private void maybePromptDvrFolder() {
+        if (hasDvrFolder()) return;
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+        intent.addCategory(Intent.CATEGORY_DEFAULT);
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION |
+                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION |
+                        Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        try { startActivityForResult(intent, PICK_DVR_REQUEST_CODE); } catch (Exception ignored) {}
+    }
+
     @SuppressLint("ClickableViewAccessibility")
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -2396,7 +2410,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
     // encoder follow-up — see apfpv-dvr-recordmode-autodvr memory.)
     public int getDvrRecordMode() { return getSharedPreferences("general", Context.MODE_PRIVATE).getInt("dvr_record_mode", 1); }
     public void setDvrRecordMode(int m) { getSharedPreferences("general", Context.MODE_PRIVATE).edit().putInt("dvr_record_mode", m).apply(); }
-    public boolean getDvrAuto() { return getSharedPreferences("general", Context.MODE_PRIVATE).getBoolean("dvr_auto", false); }
+    public boolean getDvrAuto() { return getSharedPreferences("general", Context.MODE_PRIVATE).getBoolean("dvr_auto", true); }
     public void setDvrAuto(boolean e) { getSharedPreferences("general", Context.MODE_PRIVATE).edit().putBoolean("dvr_auto", e).apply(); }
 
     // Auto DVR is ARM-DRIVEN: with it enabled, arming the FC starts recording and disarming stops
