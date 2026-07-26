@@ -57,41 +57,40 @@ public final class AalinkStats {
     /** True while the data is recent enough to trust; otherwise callers should fall back. */
     public boolean fresh() { return lastOkMs != 0 && (System.currentTimeMillis() - lastOkMs) < 5000; }
 
+    /** Port the VTX aalink_udp relay pushes /tmp/aalink_ext.msg to. */
+    public static final int UDP_PORT = 14551;
+
+    // UDP instead of HTTP: on the dongle the TCP uplink to the VTX is dead (the HTTP GET's SYN is
+    // never answered), so the old poll always failed and the aalink line stayed blank -- while MSP
+    // works because it is PUSHED inbound. The VTX-side aalink_udp binary sends the same key=value
+    // payload as a UDP datagram, which reaches this socket the same way MSP does. No uplink needed.
     private void run() {
-        Log.i(TAG, "polling " + url);
+        Log.i(TAG, "listening for aalink on UDP " + UDP_PORT);
+        byte[] buf = new byte[2048];
+        java.net.DatagramSocket sock = null;
         while (running) {
-            HttpURLConnection c = null;
             try {
-                c = (HttpURLConnection) new URL(url).openConnection();
-                // Short timeouts: a dead link must not stall this thread for seconds on end.
-                c.setConnectTimeout(1500);
-                c.setReadTimeout(1500);
-                StringBuilder sb = new StringBuilder();
-                try (BufferedReader r = new BufferedReader(new InputStreamReader(c.getInputStream()))) {
-                    String ln;
-                    while ((ln = r.readLine()) != null) sb.append(ln).append('\n');
+                if (sock == null || sock.isClosed()) {
+                    sock = new java.net.DatagramSocket(UDP_PORT);
+                    sock.setSoTimeout(1000);   // so `running` is re-checked ~1 Hz
                 }
-                if (sb.length() > 0) { parse(sb.toString()); lastOkMs = System.currentTimeMillis(); }
-                fails = 0;
-            } catch (Exception ignored) {
-                // VTX unreachable / bridge down — keep the last values and back off.
-                if (fails < 60) fails++;
-            } finally {
-                if (c != null) c.disconnect();
+                java.net.DatagramPacket p = new java.net.DatagramPacket(buf, buf.length);
+                sock.receive(p);
+                if (p.getLength() > 0) {
+                    parse(new String(buf, 0, p.getLength(), java.nio.charset.StandardCharsets.US_ASCII));
+                    lastOkMs = System.currentTimeMillis();
+                }
+            } catch (java.net.SocketTimeoutException ignored) {
+                // idle — no aalink push this second (relay not running / link down). Keep last values.
+            } catch (Exception e) {
+                if (!running) break;
+                // Port already bound or interface gone; back off and retry rather than dying.
+                Log.w(TAG, "aalink UDP error (" + e.getMessage() + ") — retrying in 2s");
+                if (sock != null) { sock.close(); sock = null; }
+                try { Thread.sleep(2000); } catch (InterruptedException ie) { break; }
             }
-            // BACK OFF ON FAILURE. On the dongle path this request traverses the APFPV IP bridge /
-            // TUN, i.e. the same link that carries video. Retrying every second while it is down
-            // pushed steady connection attempts into that TX path and loaded the CPU the RX worker
-            // needs, which showed up as the app becoming unresponsive on dongle while phone-Wi-Fi
-            // (where the request never leaves the OS) was fine. 1s when healthy, up to 15s when not.
-            // Cap at 60 s, not 15 s. Measured on-device: the TUN *uplink* to the VTX is dead
-            // (ping 192.168.0.1 over tun0 = 100% loss) even though the route is correct and the
-            // DOWNLINK works -- MSP arrives and arm state decodes. So every attempt is a TCP SYN
-            // that can never be answered, pushed into the same dongle TX path the video uses. Until
-            // the uplink is fixed this must cost as close to nothing as possible.
-            long delay = (fails == 0) ? 1000L : Math.min(60000L, 1000L * (1L << Math.min(fails, 6)));
-            try { Thread.sleep(delay); } catch (InterruptedException e) { break; }
         }
+        if (sock != null) sock.close();
         Log.i(TAG, "stopped");
     }
 

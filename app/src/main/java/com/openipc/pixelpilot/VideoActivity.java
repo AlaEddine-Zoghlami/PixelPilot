@@ -140,7 +140,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
 
     public static int getChannel(Context context) {
         return context.getSharedPreferences("general",
-                Context.MODE_PRIVATE).getInt("wifi-channel", 161);
+                Context.MODE_PRIVATE).getInt("wifi-channel", 36);
     }
 
     public static int getBandwidth(Context context) {
@@ -384,7 +384,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
                     Toast.makeText(VideoActivity.this, "APFPV Wi-Fi: " + d, Toast.LENGTH_LONG).show()); }
             });
         String savedMode = getSharedPreferences("pixelpilot", MODE_PRIVATE)
-                        .getString("link_mode", "wfb");
+                        .getString("link_mode", "apfpv");   // default: dongle-as-station to the VTX AP
         linkMode = "apfpv".equals(savedMode) ? LinkModeCoordinator.Mode.APFPV
                  : "apfpv_wifi".equals(savedMode) ? LinkModeCoordinator.Mode.APFPV_WIFI
                  : LinkModeCoordinator.Mode.WFB;
@@ -2408,7 +2408,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
 
     // Record mode: 0=Raw, 1=OSD, 2=Raw+OSD. (Raw+OSD records two files; raw stream is the dual-
     // encoder follow-up — see apfpv-dvr-recordmode-autodvr memory.)
-    public int getDvrRecordMode() { return getSharedPreferences("general", Context.MODE_PRIVATE).getInt("dvr_record_mode", 1); }
+    public int getDvrRecordMode() { return getSharedPreferences("general", Context.MODE_PRIVATE).getInt("dvr_record_mode", 2); }
     public void setDvrRecordMode(int m) { getSharedPreferences("general", Context.MODE_PRIVATE).edit().putInt("dvr_record_mode", m).apply(); }
     public boolean getDvrAuto() { return getSharedPreferences("general", Context.MODE_PRIVATE).getBoolean("dvr_auto", true); }
     public void setDvrAuto(boolean e) { getSharedPreferences("general", Context.MODE_PRIVATE).edit().putBoolean("dvr_auto", e).apply(); }
@@ -2755,20 +2755,31 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         int[] rootLoc = new int[2]; root.getLocationInWindow(rootLoc);
         if (osdManager != null && osdManager.listOSDItems != null) {
             for (com.openipc.pixelpilot.osd.OSDElement el : osdManager.listOSDItems) {
-                android.view.View v = el.layout;
-                if (v == null || v.getVisibility() != View.VISIBLE || v.getWidth() <= 0 || v.getHeight() <= 0) continue;
-                int[] loc = new int[2]; v.getLocationInWindow(loc);
-                float cx = (loc[0] - rootLoc[0]) + v.getWidth() / 2f;
-                float cy = (loc[1] - rootLoc[1]) + v.getHeight() / 2f;
-                float ncx = cx * sx, ncy = cy * sy;         // element center, % preserved
-                int save = c.save();
-                c.translate(ncx - v.getWidth() * ss / 2f, ncy - v.getHeight() * ss / 2f);
-                c.scale(ss, ss);
-                v.draw(c);
-                c.restoreToCount(save);
+                drawViewScaled(c, el.layout, rootLoc, sx, sy, ss);
             }
         }
+        // The MSP OSD (Betaflight DisplayPort) and the aalink stats line are separate addContentView
+        // overlays, not osdManager items, so they must be drawn explicitly or the recording shows the
+        // legacy OSD only. Draw the primary (left-eye) views; the R variants exist only for VR display.
+        drawViewScaled(c, osdView, rootLoc, sx, sy, ss);
+        drawViewScaled(c, aalinkView, rootLoc, sx, sy, ss);
         return bmp;
+    }
+
+    /** Draw one overlay View into the OSD-capture canvas, preserving its %-from-edge position and
+     *  true (unstretched) size — the shared placement math for every captured layer. */
+    private void drawViewScaled(android.graphics.Canvas c, android.view.View v, int[] rootLoc,
+                                float sx, float sy, float ss) {
+        if (v == null || v.getVisibility() != View.VISIBLE || v.getWidth() <= 0 || v.getHeight() <= 0) return;
+        int[] loc = new int[2]; v.getLocationInWindow(loc);
+        float cx = (loc[0] - rootLoc[0]) + v.getWidth() / 2f;
+        float cy = (loc[1] - rootLoc[1]) + v.getHeight() / 2f;
+        float ncx = cx * sx, ncy = cy * sy;         // element center, % preserved
+        int save = c.save();
+        c.translate(ncx - v.getWidth() * ss / 2f, ncy - v.getHeight() * ss / 2f);
+        c.scale(ss, ss);
+        v.draw(c);
+        c.restoreToCount(save);
     }
 
     private Timer osdUpdateTimer;
@@ -2846,6 +2857,16 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         Intent intent = new Intent(this, WfbNgVpnService.class);
         intent.setAction("STOP_SERVICE");
         startService(intent);
+
+        // Also stop the APFPV (dongle) TUN. It was leaking: only WfbNgVpnService was stopped here,
+        // so on APFPV/dongle mode ApfpvVpnService kept running after the activity closed. Because a
+        // Service keeps its PROCESS alive, a normal close (back/home/swipe) left a half-dead process
+        // — dongle already disconnected by stopAdapters() above, but the VPN still "up" — and the
+        // next launch reused that stale process and fought it for the dongle (restart churn, no
+        // MSP/aalink data, overlays blank). Only an explicit force-stop cleaned it, which is why it
+        // worked when launched via adb but not when the user tapped the icon. Stopping it here lets
+        // the process die cleanly so every relaunch is a fresh start.
+        startService(new Intent(this, ApfpvVpnService.class).setAction("STOP"));
     }
 
     @Override
@@ -2878,7 +2899,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
                 String pass = getSharedPreferences("pixelpilot", MODE_PRIVATE).getString("apfpv_pass", "12345678");
                 // APFPV (dongle) RF is independent of WFB: use the APFPV channel +
                 // bandwidth prefs (default legal DE 5.2 GHz UNII-1 ch40, 20 MHz).
-                int apfpvCh = getSharedPreferences("pixelpilot", MODE_PRIVATE).getInt("apfpv_channel", 40);
+                int apfpvCh = getSharedPreferences("pixelpilot", MODE_PRIVATE).getInt("apfpv_channel", 36);
                 int apfpvBw = getSharedPreferences("pixelpilot", MODE_PRIVATE).getInt("apfpv_bandwidth", 20);
                 apfpvLinkManager.setChannel(apfpvCh);
                 apfpvLinkManager.setBandwidth(apfpvBw);

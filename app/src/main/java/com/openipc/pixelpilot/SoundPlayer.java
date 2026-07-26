@@ -31,7 +31,10 @@ import java.util.concurrent.BlockingQueue;
  */
 public final class SoundPlayer {
     private static final String TAG = "SoundPlayer";
-    private static final int SR = 32000;          // EdgeTX pack native rate
+    // Fixed device/track rate. Clips are resampled to this from whatever rate their WAV header
+    // declares (mirrors the Windows player's SDL_BuildAudioCVT), so a mixed-rate pack — or one that
+    // isn't the rate we assumed — plays at correct pitch/speed instead of 2x-fast an octave high.
+    private static final int SR = 32000;
 
     private final AssetManager assets;
     private final String dir;                     // "sounds"
@@ -102,16 +105,20 @@ public final class SoundPlayer {
         }
     }
 
-    /** Decode a WAV asset to raw PCM (skip the header), cache it. Null if missing/bad. */
+    /**
+     * Decode a WAV asset to 16-bit mono PCM at {@link #SR}, resampling from the file's own rate, and
+     * cache it. Mirrors the Windows player: read the clip's real format, convert to the device format.
+     * Null if missing/bad.
+     */
     private byte[] load(String name) {
         byte[] c = cache.get(name);
         if (c != null) return c.length == 0 ? null : c;
         try (InputStream is = assets.open(dir + "/" + name)) {
             byte[] all = readAll(is);
-            int off = pcmDataOffset(all);
-            if (off < 0 || off >= all.length) { cache.put(name, new byte[0]); return null; }
-            byte[] pcm = new byte[all.length - off];
-            System.arraycopy(all, off, pcm, 0, pcm.length);
+            Wav w = parseWav(all);
+            if (w == null) { cache.put(name, new byte[0]); return null; }
+            byte[] pcm = toMono16(all, w);
+            if (w.rate != SR) pcm = resample16(pcm, w.rate, SR);
             cache.put(name, pcm);
             return pcm;
         } catch (Exception e) {
@@ -121,16 +128,77 @@ public final class SoundPlayer {
         }
     }
 
-    /** Find the 'data' chunk offset in a RIFF/WAVE file (usually 44, but be robust). */
-    private static int pcmDataOffset(byte[] b) {
-        if (b.length < 12 || b[0] != 'R' || b[1] != 'I' || b[2] != 'F' || b[3] != 'F') return -1;
+    /** Parsed WAV geometry: PCM data window plus the source format we must convert from. */
+    private static final class Wav { int off, len, rate, channels, bits; }
+
+    /** Walk RIFF chunks for 'fmt ' (rate/channels/bits) and 'data' (offset/length). */
+    private static Wav parseWav(byte[] b) {
+        if (b.length < 12 || b[0] != 'R' || b[1] != 'I' || b[2] != 'F' || b[3] != 'F'
+                || b[8] != 'W' || b[9] != 'A' || b[10] != 'V' || b[11] != 'E') return null;
+        Wav w = new Wav();
         int i = 12;
         while (i + 8 <= b.length) {
-            int size = (b[i+4] & 0xFF) | ((b[i+5] & 0xFF) << 8) | ((b[i+6] & 0xFF) << 16) | ((b[i+7] & 0xFF) << 24);
-            if (b[i] == 'd' && b[i+1] == 'a' && b[i+2] == 't' && b[i+3] == 'a') return i + 8;
-            i += 8 + size + (size & 1);
+            int size = u32(b, i + 4);
+            int body = i + 8;
+            if (b[i] == 'f' && b[i+1] == 'm' && b[i+2] == 't' && b[i+3] == ' ' && body + 16 <= b.length) {
+                w.channels = u16(b, body + 2);
+                w.rate     = u32(b, body + 4);
+                w.bits     = u16(b, body + 14);
+            } else if (b[i] == 'd' && b[i+1] == 'a' && b[i+2] == 't' && b[i+3] == 'a') {
+                w.off = body;
+                w.len = Math.min(size, b.length - body);
+            }
+            if (size < 0) break;
+            i = body + size + (size & 1);
         }
-        return -1;
+        // Only 16-bit PCM is supported (the whole pack is); anything else we can't safely play.
+        if (w.rate <= 0 || w.bits != 16 || w.channels < 1 || w.len <= 0) return null;
+        return w;
+    }
+
+    /** Downmix to mono 16-bit if needed; return a tightly-sized little-endian PCM buffer. */
+    private static byte[] toMono16(byte[] b, Wav w) {
+        if (w.channels == 1) {
+            byte[] pcm = new byte[w.len & ~1];
+            System.arraycopy(b, w.off, pcm, 0, pcm.length);
+            return pcm;
+        }
+        int frame = 2 * w.channels;
+        int frames = w.len / frame;
+        byte[] out = new byte[frames * 2];
+        for (int f = 0; f < frames; f++) {
+            int acc = 0, base = w.off + f * frame;
+            for (int ch = 0; ch < w.channels; ch++) acc += (short) (u16(b, base + ch * 2));
+            int s = acc / w.channels;
+            out[f * 2]     = (byte) (s & 0xFF);
+            out[f * 2 + 1] = (byte) ((s >> 8) & 0xFF);
+        }
+        return out;
+    }
+
+    /** Linear-interpolate 16-bit mono PCM from srcRate to dstRate. */
+    private static byte[] resample16(byte[] in, int srcRate, int dstRate) {
+        int nIn = in.length / 2;
+        if (nIn == 0) return in;
+        long nOut = (long) nIn * dstRate / srcRate;
+        byte[] out = new byte[(int) nOut * 2];
+        for (int i = 0; i < nOut; i++) {
+            double srcPos = (double) i * srcRate / dstRate;
+            int i0 = (int) srcPos;
+            int i1 = Math.min(i0 + 1, nIn - 1);
+            double frac = srcPos - i0;
+            int s0 = (short) ((in[i0*2] & 0xFF) | (in[i0*2+1] << 8));
+            int s1 = (short) ((in[i1*2] & 0xFF) | (in[i1*2+1] << 8));
+            int s = (int) Math.round(s0 + (s1 - s0) * frac);
+            out[i*2]     = (byte) (s & 0xFF);
+            out[i*2 + 1] = (byte) ((s >> 8) & 0xFF);
+        }
+        return out;
+    }
+
+    private static int u16(byte[] b, int o) { return (b[o] & 0xFF) | ((b[o+1] & 0xFF) << 8); }
+    private static int u32(byte[] b, int o) {
+        return (b[o] & 0xFF) | ((b[o+1] & 0xFF) << 8) | ((b[o+2] & 0xFF) << 16) | ((b[o+3] & 0xFF) << 24);
     }
 
     private static byte[] readAll(InputStream is) throws Exception {

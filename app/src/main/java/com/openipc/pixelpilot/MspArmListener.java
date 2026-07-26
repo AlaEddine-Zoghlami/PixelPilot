@@ -176,6 +176,11 @@ public final class MspArmListener {
                 | ((long) (b[o + 2] & 0xFF) << 16)
                 | ((long) (b[o + 3] & 0xFF) << 24);
         boolean armed = (flags & 1L) != 0;
+        // Reflect the arm bit into soundVars so the voice-alert engine's `when=armed` /
+        // `when=!armed` rules can edge. Without this soundVars.armed stayed false forever and the
+        // arm/disarm announcements never fired, even though auto-DVR (which uses the callback
+        // below) worked. Written every status; the render loop reads a synchronized snapshot.
+        synchronized (soundVars) { soundVars.armed = armed; soundVars.haveArmed = true; }
         if (lastArmed == null || lastArmed != armed) {
             Log.i(TAG, (lastArmed == null ? "initial" : "edge") + " arm state: "
                     + (armed ? "ARMED" : "DISARMED") + String.format(" (flags=0x%08x)", flags));
