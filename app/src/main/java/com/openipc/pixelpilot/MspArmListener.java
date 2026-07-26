@@ -55,6 +55,10 @@ public final class MspArmListener {
     /** Optional: also decode MSP_DISPLAYPORT into this canvas for the ground-side OSD. */
     public MspOsdCanvas osdCanvas;
 
+    /** OSD-scraped values + arm bit for the voice alerts (SoundEvents). Written on this MSP
+     *  thread; the render loop reads a snapshot. Null-safe: sound is optional. */
+    public final SoundEvents.Vars soundVars = new SoundEvents.Vars();
+
     public MspArmListener(int port, ArmCallback callback) {
         this.port = port;
         this.callback = callback;
@@ -138,7 +142,15 @@ public final class MspArmListener {
             if ((crc & 0xFF) == (b[payloadStart + payloadLen] & 0xFF)) {
                 // The same forwarded stream also carries MSP_DISPLAYPORT: one socket feeds both
                 // arm detection and the ground-side OSD.
-                if (cmd == 182 && osdCanvas != null) osdCanvas.feed(b, payloadStart, payloadLen);
+                if (cmd == 182) {
+                    if (osdCanvas != null) osdCanvas.feed(b, payloadStart, payloadLen);
+                    // DisplayPort WRITE_STRING (sub 3): row,col,attr, then glyphs -> scrape a value.
+                    if (payloadLen >= 4 && (b[payloadStart] & 0xFF) == 3) {
+                        synchronized (soundVars) {
+                            SoundEvents.feedOsdRun(soundVars, b, payloadStart + 4, payloadLen - 4);
+                        }
+                    }
+                }
                 if ((cmd == MSP_STATUS || cmd == MSP_STATUS_EX) && payloadLen >= 10) {
                     handleStatus(b, payloadStart);
                 }

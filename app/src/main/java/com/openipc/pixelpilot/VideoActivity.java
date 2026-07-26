@@ -664,6 +664,8 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
 
         // Bandwidth submenu — 20/40/80 MHz (must match the VTX's actual operating width)
         setupBandwidthSubMenu(popup);
+        setupOsdFontSubMenu(popup);
+        setupSoundSubMenu(popup);
 
         // OSD submenu
         setupOSDSubMenu(popup);
@@ -710,6 +712,43 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
     /**
      * Submenu that toggles VR mode.
      */
+    /** OSD font picker. The atlases live in assets/fonts/ (4-page HD Betaflight atlases,
+     *  the same layout MspOsdCanvas derives glyph size from). The chosen asset name is
+     *  persisted and re-loaded by buildOsdViews; changing it rebuilds the OSD canvas live. */
+    private static final String[] OSD_FONTS = {
+        "BTFL_default", "BTFL_BLINDER_HD", "BTFL_CLASH_HD", "BTFL_CONTHRAX_HD",
+        "BTFL_EUROPA_HD", "BTFL_NEXUS_HD", "BTFL_SPHERE_HD"
+    };
+    public static String getOsdFont(Context ctx) {
+        return ctx.getSharedPreferences("general", MODE_PRIVATE).getString("osd-font", "BTFL_default");
+    }
+    private void setupOsdFontSubMenu(PopupMenu popup) {
+        SubMenu m = popup.getMenu().addSubMenu("OSD font");
+        String cur = getOsdFont(this);
+        MenuItem hdr = m.add("Current: " + cur); hdr.setEnabled(false);
+        for (String f : OSD_FONTS) {
+            m.add(f).setOnMenuItemClickListener(item -> {
+                getSharedPreferences("general", MODE_PRIVATE).edit().putString("osd-font", f).apply();
+                // rebuild the OSD with the new font on the UI thread
+                runOnUiThread(() -> { if (osdCanvas != null) { buildOsdViews(); } });
+                return true;
+            });
+        }
+    }
+
+    /** Voice-alert on/off. Persisted; applies live to the running SoundPlayer. */
+    private void setupSoundSubMenu(PopupMenu popup) {
+        SubMenu m = popup.getMenu().addSubMenu("Voice alerts");
+        boolean on = getSoundEnabled(this);
+        MenuItem hdr = m.add("Now: " + (on ? "ON" : "OFF")); hdr.setEnabled(false);
+        m.add("On").setOnMenuItemClickListener(i -> { setSound(true); return true; });
+        m.add("Off").setOnMenuItemClickListener(i -> { setSound(false); return true; });
+    }
+    private void setSound(boolean on) {
+        getSharedPreferences("general", MODE_PRIVATE).edit().putBoolean("sound-alerts", on).apply();
+        if (soundPlayer != null) soundPlayer.setEnabled(on);
+    }
+
     private void setupVRSubMenu(PopupMenu popup) {
         SubMenu vrMenu = popup.getMenu().addSubMenu("VR mode");
         MenuItem vrItem = vrMenu.add(getVRSetting() ? "On" : "Off");
@@ -2496,7 +2535,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
             }
         } catch (Throwable ignored) { }
         osdCanvas = new MspOsdCanvas();
-        if (!osdCanvas.loadAtlas(this, "font_btfl.png")) { osdCanvas = null; return; }
+        if (!osdCanvas.loadAtlas(this, "fonts/" + getOsdFont(this) + ".png")) { osdCanvas = null; return; }
         if (mspArmListener != null) mspArmListener.osdCanvas = osdCanvas;
         buildOsdViews();
     }
@@ -2584,6 +2623,42 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
     }
 
     private MspArmListener mspArmListener;
+    // Voice alerts (OpenTX-style condition table fed by MSP arm + OSD-scraped values).
+    private SoundPlayer soundPlayer;
+    private SoundEvents soundEvents;
+    private android.os.Handler soundHandler;
+    private Runnable soundTick;
+    public static boolean getSoundEnabled(Context c) {
+        return c.getSharedPreferences("general", MODE_PRIVATE).getBoolean("sound-alerts", true);
+    }
+    private void startSoundAlerts() {
+        if (soundPlayer != null) return;
+        soundPlayer = new SoundPlayer(this, "sounds");
+        soundPlayer.start();
+        soundPlayer.setEnabled(getSoundEnabled(this));
+        soundEvents = new SoundEvents();
+        soundEvents.setPlayer(soundPlayer);
+        soundEvents.load(this, "apfpv_sounds.conf");
+        soundHandler = new android.os.Handler(getMainLooper());
+        soundTick = new Runnable() {
+            @Override public void run() {
+                if (soundEvents != null && mspArmListener != null) {
+                    synchronized (mspArmListener.soundVars) {
+                        soundEvents.evaluate(mspArmListener.soundVars,
+                                android.os.SystemClock.elapsedRealtime());
+                    }
+                }
+                if (soundHandler != null) soundHandler.postDelayed(this, 500);
+            }
+        };
+        soundHandler.postDelayed(soundTick, 500);
+    }
+    private void stopSoundAlerts() {
+        if (soundHandler != null && soundTick != null) soundHandler.removeCallbacks(soundTick);
+        soundHandler = null;
+        if (soundPlayer != null) { soundPlayer.shutdown(); soundPlayer = null; }
+        soundEvents = null;
+    }
     private void startArmWatcher() {
         if (mspArmListener != null) return;
         mspArmListener = new MspArmListener(MspArmListener.DEFAULT_PORT, armed -> runOnUiThread(() -> {
@@ -2598,8 +2673,10 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
             }
         }));
         mspArmListener.start();
+        startSoundAlerts();
     }
     private void stopArmWatcher() {
+        stopSoundAlerts();
         if (mspArmListener != null) { mspArmListener.stop(); mspArmListener = null; }
     }
     /** True once real FC arm telemetry has been seen — then arm owns the start/stop decision. */
