@@ -71,6 +71,16 @@ are coordinated by `ApfpvLinkManager` / `LinkModeCoordinator`.
 
 ## Ground-station features
 
+> **VTX prerequisite.** The ground-drawn OSD, the MSP/aalink overlays, and the
+> raw / dual recording all rely on the air unit running in **ground mode** — the
+> VTX streaming *clean* video while forwarding MSP (UDP 14550) and pushing aalink
+> (UDP 14551). Set that up with the scripts in
+> [**apfpv-vtx**](https://github.com/GingerFluffyCat/apfpv-vtx)
+> (`vtx-osd-mode.sh ground` + the `aalink_udp` relay); it installs the
+> forward-capable msposd and can be reverted with `vtx-osd-mode.sh stock`. Without
+> ground mode the VTX burns its own OSD into the video and the raw/dual recording
+> isn't clean.
+
 - **Auto DVR + dual raw/OSD recording.** Recording starts automatically on FC
   **arm** and stops on disarm (auto-DVR default on). Three record modes: Raw
   (clean), OSD (overlay burned in), and **Raw+OSD** (default — writes *two*
