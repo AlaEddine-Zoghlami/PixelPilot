@@ -71,10 +71,10 @@ are coordinated by `ApfpvLinkManager` / `LinkModeCoordinator`.
 
 ## Ground-station features
 
-> **VTX prerequisite.** The ground-drawn OSD, the MSP/aalink overlays, and the
-> raw / dual recording all rely on the air unit running in **ground mode** — the
-> VTX streaming *clean* video while forwarding MSP (UDP 14550) and pushing aalink
-> (UDP 14551). Set that up with the scripts in
+> **VTX prerequisite.** The ground-drawn OSD, the MSP/aalink overlays, the
+> raw / dual recording, **and audio playback** all rely on the air unit running
+> in **ground mode** — the VTX streaming *clean* video while forwarding MSP
+> (UDP 14550) and pushing aalink (UDP 14551). Set that up with the scripts in
 > [**apfpv-vtx**](https://github.com/GingerFluffyCat/apfpv-vtx)
 > (`vtx-osd-mode.sh ground` + the `aalink_udp` relay); it installs the
 > forward-capable msposd and can be reverted with `vtx-osd-mode.sh stock`. Without
