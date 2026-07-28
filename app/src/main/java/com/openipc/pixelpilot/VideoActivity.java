@@ -1853,8 +1853,11 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
             item.setChecked(en); setDvrAuto(en);
             // Auto DVR is ARM-driven: record exactly the armed window. The stream-presence watcher
             // still runs, but only as a fallback for setups with no arm telemetry (see below).
-            if (en) { startAutoDvrWatcher(); startArmWatcher(); }
-            else    { stopAutoDvrWatcher();  stopArmWatcher();  }
+            // The MSP arm watcher also feeds the ground OSD + voice alerts, so it must keep running
+            // regardless of Auto DVR — toggling Auto DVR off only stops the RECORDING, not the OSD.
+            // (The arm callback and the stream watcher both already gate recording on getDvrAuto().)
+            if (en) startAutoDvrWatcher(); else stopAutoDvrWatcher();
+            startArmWatcher();
             item.setShowAsAction(MenuItem.SHOW_AS_ACTION_COLLAPSE_ACTION_VIEW);
             item.setActionView(new View(this));
             return false;
@@ -2929,7 +2932,11 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         videoPlayer.startAudio();
         // Flush stale frames at the menu-configured threshold (default 60ms).
         videoPlayer.setVideoFlushMs(getVideoFlushMs(this));
-        if (getDvrAuto()) { startAutoDvrWatcher(); startArmWatcher(); }
+        // Always run the MSP arm watcher — it feeds the ground OSD and the voice alerts, which must
+        // show whether or not Auto DVR is on. Only the auto-record stream watcher is gated on Auto
+        // DVR; recording itself is additionally gated inside both watchers via getDvrAuto().
+        startArmWatcher();
+        if (getDvrAuto()) startAutoDvrWatcher();
         startAalinkStats();
         startGroundOsd();
         if (aalinkStats == null && osdCanvas == null) stopAalinkStats();   // nothing to tick
@@ -3033,6 +3040,86 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         }
     }
 
+    // --- Display frame-rate matching (LATENCY-FREE smoothness) -----------------------------
+    // Judder on a 120 Hz panel with a ~90 fps stream is a cadence mismatch: each frame is held
+    // for 1.33 vsyncs (4:3 pulldown). Matching the panel refresh to the actual stream fps makes
+    // frames map to a WHOLE number of vsyncs — smooth — and adds ZERO latency: it changes only
+    // the panel cadence, not the presentation pipeline (vsync stays off in GLFanoutRenderer, so
+    // frames still present as soon as they arrive; we just line the panel rate up with them).
+    private int lastAppliedFps = 0;
+    private int candidateFps = 0, candidateCount = 0;   // debounce for the display-mode switch
+
+    private static int snapFps(float f) {
+        final int[] common = { 24, 25, 30, 48, 50, 60, 90, 100, 120, 144 };
+        int r = Math.round(f);
+        for (int c : common) if (Math.abs(r - c) <= 6) return c;   // snap jittery measured fps to the nominal rate
+        return r;
+    }
+
+    /** Re-select the display mode whose refresh best matches the stream fps (frames map to whole
+     *  vsyncs → no pulldown judder) and hint the platform the exact content rate. Called from
+     *  onDecodingInfoChanged once the live decode fps is known; a no-op until the fps changes. */
+    private void matchDisplayToStreamFps(float measuredFps) {
+        final int fps = snapFps(measuredFps);
+        if (fps <= 0) return;
+        // Anti-thrash debounce. The measured decode fps DIPS on packet loss (e.g. 90 -> 30/60/70),
+        // and every display-mode switch is a visible panel flicker. So only act on an fps that has
+        // been STABLE across several readings (~a few seconds at onDecodingInfoChanged's ~1 Hz).
+        // Transient loss-induced dips never reach the threshold, so the panel stays locked at the
+        // real content rate instead of bouncing between 60/90/120 Hz.
+        if (fps == candidateFps) candidateCount++; else { candidateFps = fps; candidateCount = 1; }
+        if (fps == lastAppliedFps) return;
+        if (candidateCount < 4) return;   // require ~4 consecutive stable readings before switching
+        try {
+            android.view.Display disp = getWindowManager().getDefaultDisplay();
+            android.view.Display.Mode cur = disp.getMode();
+            android.view.Display.Mode best = null; double bestScore = Double.MAX_VALUE;
+            for (android.view.Display.Mode m : disp.getSupportedModes()) {
+                if (m.getPhysicalWidth() != cur.getPhysicalWidth()
+                        || m.getPhysicalHeight() != cur.getPhysicalHeight()) continue;
+                double r = m.getRefreshRate();
+                double mult = r / fps;
+                double frac = Math.abs(mult - Math.round(mult));   // distance to a whole multiple of fps
+                // Lower score = smoother. A refresh below the content rate can't show every frame,
+                // so it's penalised hardest; otherwise prefer a whole multiple, then the smallest
+                // one (so an exact match r==fps wins over 2x, for min power + latency).
+                double score = (r + 0.5 < fps) ? 1000.0 + (fps - r) : frac * 100.0 + mult;
+                if (best == null || score < bestScore) { best = m; bestScore = score; }
+            }
+            if (best != null) {
+                WindowManager.LayoutParams lp = getWindow().getAttributes();
+                if (lp.preferredDisplayModeId != best.getModeId()) {
+                    lp.preferredDisplayModeId = best.getModeId();
+                    getWindow().setAttributes(lp);
+                }
+                com.openipc.videonative.GLFanoutManager.setDisplayRefreshRateHz(best.getRefreshRate());
+                Log.i(TAG, "match display to " + fps + "fps -> " + best.getPhysicalWidth() + "x"
+                        + best.getPhysicalHeight() + "@" + best.getRefreshRate() + "Hz");
+            }
+            applySurfaceFrameRate(fps);
+            lastAppliedFps = fps;
+        } catch (Throwable t) { Log.w(TAG, "match display to fps failed: " + t); }
+    }
+
+    /** Tell the platform the exact content frame rate (API 30+) so it frame-matches precisely,
+     *  independent of the manual mode pick above. FIXED_SOURCE = a fixed-rate source (video). */
+    private void applySurfaceFrameRate(int fps) {
+        if (android.os.Build.VERSION.SDK_INT < 30) return;
+        android.view.SurfaceView[] svs = { binding.mainVideo, binding.surfaceViewLeft, binding.surfaceViewRight };
+        for (android.view.SurfaceView sv : svs) {
+            if (sv == null) continue;
+            android.view.Surface s = sv.getHolder().getSurface();
+            if (s == null || !s.isValid()) continue;
+            try {
+                if (android.os.Build.VERSION.SDK_INT >= 31)
+                    s.setFrameRate((float) fps, android.view.Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE,
+                                   android.view.Surface.CHANGE_FRAME_RATE_ALWAYS);
+                else
+                    s.setFrameRate((float) fps, android.view.Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE);
+            } catch (Throwable ignored) { /* surface not ready / unsupported — harmless */ }
+        }
+    }
+
     @Override
     public void onDecodingInfoChanged(final DecodingInfo decodingInfo) {
         mDecodingInfo = decodingInfo;
@@ -3041,6 +3128,8 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
             if (lastCodec != decodingInfo.nCodec) {
                 lastCodec = decodingInfo.nCodec;
             }
+            // Line the panel refresh up with the actual stream fps (latency-free anti-judder).
+            if (decodingInfo.currentFPS > 0) matchDisplayToStreamFps(decodingInfo.currentFPS);
             if (decodingInfo.currentFPS > 0) {
                 binding.tvMessage.setVisibility(View.GONE);
                 binding.wifiMessage.setVisibility(View.GONE);

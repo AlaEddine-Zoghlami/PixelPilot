@@ -34,6 +34,8 @@ public final class AalinkStats {
 
     // -1 means "not known yet" so callers can render "--" rather than a misleading 0.
     public volatile int up = -1, down = -1, mcs = -1, kbps = -1, bw = -1, ch = -1, txpwr = -1, q = -1;
+    // Real streamed fps (venc) + SoC temperature (°C) — appended by the VTX aalink_udp relay.
+    public volatile int fps = -1, tempC = -1;
     private volatile long lastOkMs = 0;
     private int fails = 0;
 
@@ -111,6 +113,8 @@ public final class AalinkStats {
                 case "channel":    ch = iv; break;
                 case "txpwr_dbm":  txpwr = iv; break;
                 case "q":          q = iv; break;
+                case "fps":        fps = iv; break;     // real streamed fps (venc Fps_1s)
+                case "temp_c":     tempC = iv; break;   // SoC temperature °C
                 default: break;
             }
         }
@@ -122,8 +126,10 @@ public final class AalinkStats {
         return "LQ up:" + pct(up) + " dn:" + pct(down)
                 + " | MCS:" + (mcs < 0 ? "--" : mcs)
                 + " | " + (kbps < 0 ? "--" : kbps) + "kbps"
-                + " | ch" + (ch < 0 ? "--" : ch) + " " + (bw < 0 ? "--" : bw) + "MHz"
-                + " | tx" + (txpwr < 0 ? "--" : txpwr) + "dBm";
+                + (fps < 0 ? "" : " | " + fps + "fps")
+                + " | Ch:" + (ch < 0 ? "--" : ch) + "-" + (bw < 0 ? "--" : bw) + "mhz"
+                + " | tx" + (txpwr < 0 ? "--" : txpwr) + "dBm"
+                + (tempC < 0 ? "" : " | " + tempC + "°C");
     }
 
     private static String pct(int v) { return v < 0 ? "--" : (v + "%"); }

@@ -54,6 +54,41 @@ public final class SoundEvents {
 
     public void setPlayer(SoundPlayer sp) { this.player = sp::play; }
 
+    // ---- Stateful battery announcer ---------------------------------------------------
+    // The old timer-repeat battery rules looped ("battery low" every N seconds) and spoke the
+    // raw voltage (0 when no battery / a bad OSD read). This is a proper state machine instead:
+    // it detects the cell count, tracks a per-cell alert LEVEL, announces each lower level exactly
+    // ONCE, never repeats or goes back up within a flight, and resets on a fresh arm. It ignores an
+    // absent/implausible voltage entirely (no bench spam, no "zero"), and only runs while armed.
+    private int battLevel = 0;              // 0 ok, 1 low, 2 critical, 3 land-now
+    private int battCells = 0;              // detected on the first valid armed reading
+    private boolean battWasArmed = false;
+    private int battPendLevel = 0, battPendCount = 0;   // 2-reading confirm vs load sag
+
+    private void evaluateBattery(Vars v) {
+        boolean armed = v.haveArmed && v.armed;
+        if (armed && !battWasArmed) { battLevel = 0; battCells = 0; battPendLevel = 0; battPendCount = 0; }
+        battWasArmed = armed;
+        Double vb = v.get("vbat");
+        if (!armed || vb == null || vb < 5.0) { battPendCount = 0; return; }   // not flying / no real pack
+        if (battCells <= 0) battCells = Math.max(1, (int) Math.ceil(vb / 4.25));
+        double perCell = vb / battCells;
+        int level = perCell < 3.0 ? 3 : perCell < 3.3 ? 2 : perCell < 3.5 ? 1 : 0;
+        if (level <= battLevel) { battPendCount = 0; return; }   // same / recovered -> no re-announce
+        // Confirm the worse level across two readings so a momentary sag under load doesn't false-fire.
+        if (level == battPendLevel) battPendCount++; else { battPendLevel = level; battPendCount = 1; }
+        if (battPendCount < 2) return;
+        battLevel = level;
+        List<String> clips = new ArrayList<>();
+        switch (level) {
+            case 1:  clips.add("lowbat.wav"); break;                              // "low battery"
+            case 2:  clips.add("batalert.wav"); break;                            // "battery alert"
+            default: clips.add("batalert.wav"); clips.add("warnng.wav"); break;   // "battery alert, warning"
+        }
+        Log.i(TAG, "battery level " + level + " (" + String.format(java.util.Locale.US, "%.2fV/cell, %dS", perCell, battCells) + ") -> " + clips);
+        if (player != null) player.play(clips);
+    }
+
     // ---- OSD run parser: one WRITE_STRING run -> at most one variable ------------------
     /** Feed the glyph bytes of one DisplayPort WRITE_STRING run (after row/col/attr). */
     public static void feedOsdRun(Vars out, byte[] g, int off, int n) {
@@ -136,6 +171,7 @@ public final class SoundEvents {
 
     // ---- evaluation (edge-triggered) --------------------------------------------------
     public void evaluate(Vars v, long nowMs) {
+        evaluateBattery(v);   // stateful battery handled here, NOT via timer-repeat rules
         for (Rule r : rules) {
             Boolean truth = truth(r, v);
             if (truth == null) continue;              // variable absent -> never fires
