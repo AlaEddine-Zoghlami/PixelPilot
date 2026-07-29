@@ -136,7 +136,21 @@ class VideoDecoder
     std::condition_variable                 mFeedQueueCv;
     std::atomic<bool>                       mFeedThreadRunning{false};
     std::unique_ptr<std::thread>             mFeedThread;
-    static constexpr size_t                  FEED_QUEUE_MAX = 8;
+    // MUST be larger than the worst-case single-NALU stall in feedDecoder, or an overflow (and a
+    // reference-breaking drop) is arithmetically GUARANTEED whenever the codec input pool empties.
+    // feedDecoder spins on dequeueInputBuffer for up to 100 ms before giving up on one NALU, while
+    // 8 NALUs is only ~89 ms at 90 fps — so one stuck NALU always overflowed the queue.
+    //
+    // That is the artifact on an aalink MCS change: a bitrate step up (e.g. 12740 -> 25480 kbps)
+    // instantly enlarges every frame, the codec input pool exhausts, feedDecoder stalls, and the
+    // queue then dropped its OLDEST entries — which are exactly the NALUs the decoder needs next,
+    // so the reference chain breaks and corruption persists until the following keyframe. Measured
+    // before this change: "mFeedQueue overflow: dropped 122 NALU(s) in last 9698ms".
+    //
+    // 32 frames ~= 355 ms at 90 fps of transient absorption, comfortably past the 100 ms stall.
+    // This costs NO steady-state latency: the queue sits empty when the decoder keeps up (it is a
+    // backlog absorber, not a jitter buffer), and drop-oldest still bounds the worst case.
+    static constexpr size_t                  FEED_QUEUE_MAX = 32;
     bool                         USE_SW_DECODER_INSTEAD = false;
     // FPV latency-priority decode (APFPV). Set in configureStartDecoder from the SoC + the runtime
     // gate `persist.pixelpilot.mtkopt` (default ON; `setprop ... 0` reverts to legacy for A/B).
