@@ -2479,18 +2479,19 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
             addContentView(aalinkView, lp);
             aalinkView.bringToFront();
         } else {
-            int half = getResources().getDisplayMetrics().widthPixels / 2;
-            android.widget.FrameLayout.LayoutParams l = new android.widget.FrameLayout.LayoutParams(
-                    half, android.widget.FrameLayout.LayoutParams.WRAP_CONTENT);
-            l.gravity = android.view.Gravity.TOP | android.view.Gravity.START;
-            l.topMargin = 8;
-            addContentView(aalinkView, l);
+            // VR: one line per eye, pinned to the TOP of that eye's VIDEO rect (not the screen half)
+            // so it tracks the video as the goggles' IPD/size seekbars move and resize it. The real
+            // bounds are set from the live SurfaceView geometry in syncVrOverlays(); add with a
+            // placeholder here, then let the layout pass position it.
+            addContentView(aalinkView, new android.widget.FrameLayout.LayoutParams(
+                    android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
+                    android.widget.FrameLayout.LayoutParams.WRAP_CONTENT));
             aalinkViewR = makeAalinkLabel();
-            android.widget.FrameLayout.LayoutParams r = new android.widget.FrameLayout.LayoutParams(
-                    half, android.widget.FrameLayout.LayoutParams.WRAP_CONTENT);
-            r.gravity = android.view.Gravity.TOP | android.view.Gravity.END;
-            r.topMargin = 8;
-            addContentView(aalinkViewR, r);
+            addContentView(aalinkViewR, new android.widget.FrameLayout.LayoutParams(
+                    android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
+                    android.widget.FrameLayout.LayoutParams.WRAP_CONTENT));
+            ensureVrSyncListeners();
+            binding.frameLayout.post(this::syncVrOverlays);
         }
     }
 
@@ -2562,8 +2563,18 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         if (osdCanvas == null) return;
         android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
         boolean vr = isVRMode;
-        int w = vr ? dm.widthPixels / 2 : dm.widthPixels;
-        int h = dm.heightPixels;
+        // Bitmap size/aspect. In VR the OSD sits ON each eye's video rect, so raster it at the
+        // VIDEO aspect — MspOsdCanvas uses cellW=W/cols, cellH=H/rows, so a half-width x full-height
+        // bitmap makes the cells tall-and-narrow and the glyphs stretch vertically. At the video
+        // aspect the cells stay proportional, and FIT_XY into the (video-aspect) SurfaceView rect
+        // adds no distortion. Non-VR keeps the full-screen bitmap (unchanged).
+        int w, h;
+        if (vr) {
+            w = lastVideoW > 0 ? lastVideoW : 1280;
+            h = lastVideoH > 0 ? lastVideoH : 720;
+        } else {
+            w = dm.widthPixels; h = dm.heightPixels;
+        }
         if (w <= 0 || h <= 0) return;
         // One shared bitmap: both eyes show the same overlay, so render once and display twice.
         osdBitmap = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888);
@@ -2573,26 +2584,75 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
             osdThread.start();
             osdHandler = new android.os.Handler(osdThread.getLooper());
         }
-        osdView = new android.widget.ImageView(this);
-        // Must not intercept input: it covers the whole content area, above the controls.
-        osdView.setClickable(false); osdView.setFocusable(false);
-        osdView.setElevation(99f); osdView.setTranslationZ(99f);   // above video, below the text line
-        osdView.setScaleType(android.widget.ImageView.ScaleType.FIT_XY);
+        osdView = makeOsdImageView();
         osdView.setImageBitmap(osdBitmap);
-        android.widget.FrameLayout.LayoutParams lp = new android.widget.FrameLayout.LayoutParams(w, h);
-        lp.gravity = vr ? (android.view.Gravity.TOP | android.view.Gravity.START) : android.view.Gravity.CENTER;
-        addContentView(osdView, lp);
-        if (vr) {
-            osdViewR = new android.widget.ImageView(this);
-            osdViewR.setClickable(false); osdViewR.setFocusable(false);
-            osdViewR.setElevation(99f); osdViewR.setTranslationZ(99f);
-            osdViewR.setScaleType(android.widget.ImageView.ScaleType.FIT_XY);
+        if (!vr) {
+            android.widget.FrameLayout.LayoutParams lp = new android.widget.FrameLayout.LayoutParams(w, h);
+            lp.gravity = android.view.Gravity.CENTER;
+            addContentView(osdView, lp);
+        } else {
+            // Per-eye: pinned exactly onto each eye's video SurfaceView by syncVrOverlays().
+            addContentView(osdView, new android.widget.FrameLayout.LayoutParams(w, h));
+            osdViewR = makeOsdImageView();
             osdViewR.setImageBitmap(osdBitmap);
-            android.widget.FrameLayout.LayoutParams rp = new android.widget.FrameLayout.LayoutParams(w, h);
-            rp.gravity = android.view.Gravity.TOP | android.view.Gravity.END;
-            addContentView(osdViewR, rp);
+            addContentView(osdViewR, new android.widget.FrameLayout.LayoutParams(w, h));
+            ensureVrSyncListeners();
+            binding.frameLayout.post(this::syncVrOverlays);
         }
         osdLastGen = -1;
+    }
+
+    private android.widget.ImageView makeOsdImageView() {
+        android.widget.ImageView iv = new android.widget.ImageView(this);
+        // Must not intercept input: it covers the video, above the controls.
+        iv.setClickable(false); iv.setFocusable(false);
+        iv.setElevation(99f); iv.setTranslationZ(99f);   // above video, below the text line
+        iv.setScaleType(android.widget.ImageView.ScaleType.FIT_XY);
+        return iv;
+    }
+
+    // --- VR overlay tracking: keep the OSD + aalink glued to each eye's video SurfaceView --------
+    private boolean vrSyncListenersAdded = false;
+
+    /** Re-run syncVrOverlays() whenever a video SurfaceView is (re)laid out — i.e. on the IPD/size
+     *  seekbars, on a video-resolution/aspect change, or on rotation. */
+    private void ensureVrSyncListeners() {
+        if (vrSyncListenersAdded) return;
+        android.view.View.OnLayoutChangeListener l =
+                (v, l0, t0, r0, b0, ol, ot, or, ob) -> binding.frameLayout.post(this::syncVrOverlays);
+        binding.surfaceViewLeft.addOnLayoutChangeListener(l);
+        binding.surfaceViewRight.addOnLayoutChangeListener(l);
+        vrSyncListenersAdded = true;
+    }
+
+    /** Pin the per-eye OSD + aalink overlays exactly onto each eye's video SurfaceView, so they
+     *  follow the goggles' IPD/size seekbars and share the video's aspect (no vertical stretch). */
+    private void syncVrOverlays() {
+        if (!isVRMode) return;
+        android.view.View content = findViewById(android.R.id.content);
+        if (content == null) return;
+        int[] cl = new int[2]; content.getLocationInWindow(cl);
+        positionOverEye(osdView,     binding.surfaceViewLeft,  cl, false);
+        positionOverEye(osdViewR,    binding.surfaceViewRight, cl, false);
+        positionOverEye(aalinkView,  binding.surfaceViewLeft,  cl, true);
+        positionOverEye(aalinkViewR, binding.surfaceViewRight, cl, true);
+    }
+
+    /** Size/place one overlay to overlap a video SurfaceView. topLine=true pins a WRAP_CONTENT text
+     *  line to the top-centre of the video; otherwise the overlay fills the whole video rect. */
+    private void positionOverEye(android.view.View overlay, android.view.View surface, int[] contentLoc, boolean topLine) {
+        if (overlay == null || surface == null) return;
+        int sw = surface.getWidth(), sh = surface.getHeight();
+        if (sw <= 0 || sh <= 0) return;   // not measured yet; the layout listener will retry
+        int[] sl = new int[2]; surface.getLocationInWindow(sl);
+        int x = sl[0] - contentLoc[0], y = sl[1] - contentLoc[1];
+        android.widget.FrameLayout.LayoutParams lp = topLine
+                ? new android.widget.FrameLayout.LayoutParams(sw, android.widget.FrameLayout.LayoutParams.WRAP_CONTENT)
+                : new android.widget.FrameLayout.LayoutParams(sw, sh);
+        lp.gravity = android.view.Gravity.TOP | android.view.Gravity.START;
+        lp.leftMargin = x;
+        lp.topMargin = topLine ? y + 8 : y;
+        overlay.setLayoutParams(lp);
     }
 
     private void removeOsdViews() {
@@ -2763,8 +2823,14 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         }
         // The MSP OSD (Betaflight DisplayPort) and the aalink stats line are separate addContentView
         // overlays, not osdManager items, so they must be drawn explicitly or the recording shows the
-        // legacy OSD only. Draw the primary (left-eye) views; the R variants exist only for VR display.
-        drawViewScaled(c, osdView, rootLoc, sx, sy, ss);
+        // legacy OSD only.
+        if (isVRMode && osdBitmap != null) {
+            // VR: osdBitmap is already the full OSD at the video aspect — blit it straight into the
+            // (video-aspect) DVR frame instead of the per-eye, video-rect-sized osdView.
+            c.drawBitmap(osdBitmap, null, new android.graphics.Rect(0, 0, vw, vh), null);
+        } else {
+            drawViewScaled(c, osdView, rootLoc, sx, sy, ss);
+        }
         drawViewScaled(c, aalinkView, rootLoc, sx, sy, ss);
         return bmp;
     }
@@ -3022,6 +3088,9 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         updateViewRatio(R.id.mainVideo, lastVideoW, lastVideoH);
         updateViewRatio(R.id.surfaceViewLeft, lastVideoW, lastVideoH);
         updateViewRatio(R.id.surfaceViewRight, lastVideoW, lastVideoH);
+        // The VR OSD is rastered at the video aspect, so rebuild it once the resolution/aspect is
+        // known or changes; buildOsdViews() re-pins the overlays onto the freshly-ratioed surfaces.
+        if (isVRMode) runOnUiThread(() -> { if (osdCanvas != null) buildOsdViews(); });
     }
 
     private void updateViewRatio(int viewId, int videoW, int videoH) {
@@ -3083,6 +3152,12 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
                 // Lower score = smoother. A refresh below the content rate can't show every frame,
                 // so it's penalised hardest; otherwise prefer a whole multiple, then the smallest
                 // one (so an exact match r==fps wins over 2x, for min power + latency).
+                //
+                // The whole-multiple rule matters MORE now that the renderer paces to vsync
+                // (GLFanoutRenderer swapInterval 1), not less. Measured on device with a 90 fps
+                // stream: pinning the 120 Hz panel to its native rate made the platform give up on
+                // frame-matching (120/90 = 1.33 is not an integer) and fall back to renderFrameRate
+                // 60 -> only 60 of 90 frames presented. Choosing 90 Hz gives a clean 1:1.
                 double score = (r + 0.5 < fps) ? 1000.0 + (fps - r) : frac * 100.0 + mult;
                 if (best == null || score < bestScore) { best = m; bestScore = score; }
             }
@@ -3112,8 +3187,12 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
             if (s == null || !s.isValid()) continue;
             try {
                 if (android.os.Build.VERSION.SDK_INT >= 31)
+                    // ONLY_IF_SEAMLESS, not ALWAYS: this call is a *hint* of the content rate so the
+                    // platform can frame-match. With ALWAYS it is also permission to switch the panel
+                    // to the content rate, which dragged a 120 Hz panel down to 90 Hz and fought the
+                    // preferredDisplayModeId pin above. The mode choice belongs to matchDisplayToStreamFps.
                     s.setFrameRate((float) fps, android.view.Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE,
-                                   android.view.Surface.CHANGE_FRAME_RATE_ALWAYS);
+                                   android.view.Surface.CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS);
                 else
                     s.setFrameRate((float) fps, android.view.Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE);
             } catch (Throwable ignored) { /* surface not ready / unsupported — harmless */ }

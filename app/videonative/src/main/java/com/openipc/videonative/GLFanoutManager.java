@@ -85,7 +85,22 @@ public class GLFanoutManager implements SurfaceTexture.OnFrameAvailableListener 
             surfaceTexture.getTransformMatrix(texMatrix);
             long now = t1;
             long t2, t3;
-            boolean didSwap = now - lastDisplayNs >= DISPLAY_INTERVAL_NS;
+            // Gate the display swap with SLACK, not at exactly one refresh interval.
+            //
+            // When the stream rate equals the panel rate (the normal case: 90 fps on 90 Hz, after
+            // matchDisplayToStreamFps), frames arrive ~one interval apart with a little jitter. An
+            // exact ">= interval" test then skips every frame that lands even fractionally early,
+            // and the following one arrives ~2 intervals later — a beat that silently dropped about
+            // a third of the frames. Measured on device: codec renderFps=90 discardFps=0 while the
+            // video SurfaceView received only 57-60 fps with inter-frame gaps of 10 ms or 22-33 ms.
+            // That was the constant judder.
+            //
+            // A quarter-interval of slack lets a marginally-early frame through while still dropping
+            // frames when the source genuinely outruns the panel. BLAST still can't be overfilled:
+            // the renderer now swaps with vsync pacing (GLFanoutRenderer swapInterval 1), so
+            // eglSwapBuffers itself blocks until the next refresh.
+            final long slackNs = DISPLAY_INTERVAL_NS / 4;
+            boolean didSwap = now - lastDisplayNs >= DISPLAY_INTERVAL_NS - slackNs;
             if (!didSwap) {
                 // Encode-only: feed the DVR at full rate, don't swap to display
                 t2 = System.nanoTime();

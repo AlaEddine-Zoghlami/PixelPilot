@@ -54,7 +54,22 @@ class GLFanoutRenderer
         dispSurf_ = eglCreateWindowSurface(egl_, cfg_, display_, nullptr);
         if (dispSurf_ == EGL_NO_SURFACE) return fail("eglCreateWindowSurface(display)");
         if (!eglMakeCurrent(egl_, dispSurf_, dispSurf_, ctx_)) return fail("eglMakeCurrent");
-        eglSwapInterval(egl_, 0);   // disable vsync — render as fast as frames arrive, no FIFO pile-up
+        // Pace display swaps to vsync. Works together with the frame gate in
+        // GLFanoutManager.onFrameAvailable (one swap per refresh interval, minus a quarter-interval
+        // of slack) — the gate decides WHICH frames to present, this makes each one land on its own
+        // refresh.
+        //
+        // All four combinations were measured on device (90 fps stream, 90 Hz panel, MTK HW HEVC
+        // reporting renderFps=90 discardFps=0), counting what actually reached the video
+        // SurfaceView's BufferQueue:
+        //   swapInterval 0 + exact gate  -> 57-59 fps, gaps 10/22/33 ms   (the original judder)
+        //   swapInterval 1 + exact gate  -> 57-60 fps, gaps 10/22/33 ms
+        //   swapInterval 0 + slack gate  -> 77-90 fps but UNSTABLE: a 121 ms spike and BLAST
+        //                                   "didn't commit buffer" warnings — the free-running
+        //                                   swap refills the queue faster than it drains
+        //   swapInterval 1 + slack gate  -> 81-83 fps steady, max gap 22.5 ms, no BLAST warnings
+        // Hence this pairing. It does cost at most one refresh of latency (11 ms at 90 Hz).
+        eglSwapInterval(egl_, 1);
         if (!buildProgram()) return false;
         glGenTextures(1, &oesTex_);          // GL_TEXTURE_EXTERNAL_OES, fed by SurfaceTexture
         glBindTexture(GL_TEXTURE_EXTERNAL_OES, oesTex_);
