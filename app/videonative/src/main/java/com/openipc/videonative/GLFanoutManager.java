@@ -66,6 +66,43 @@ public class GLFanoutManager implements SurfaceTexture.OnFrameAvailableListener 
     public static void setDisplayRefreshRateHz(float hz) {
         if (hz < 20f || hz > 1000f) return; // sanity-guard against a bogus/unavailable reading
         DISPLAY_INTERVAL_NS = (long) (1_000_000_000L / hz);
+        // Keep the native pacing timebase in step — it needs the same period to place a frame on
+        // the right vsync (see GLFanoutRenderer::stampDisplayPresentationTime).
+        final GLFanoutManager m = sInstance;
+        if (m != null && m.glHandler != null) {
+            final long ns = DISPLAY_INTERVAL_NS;
+            m.glHandler.post(() -> { if (m.nativeHandle != 0) m.nativeSetRefreshNs(m.nativeHandle, ns); });
+        }
+    }
+
+    // --- vsync timebase for display presentation timestamps ------------------------------------
+    // Feeds GLFanoutRenderer the Choreographer vsync time so each swapped frame can be stamped
+    // with the vsync it is FOR (eglPresentationTimeANDROID). This is only a TIMEBASE feed — it
+    // does not gate or drive rendering, so it cannot stall the decode path the way Swappy's
+    // blocking swap did. Runs on the GL thread (a HandlerThread, so it has a Looper), which is
+    // also the thread that renders, so the value is always fresh when a frame is swapped.
+    private static volatile GLFanoutManager sInstance;
+    private android.view.Choreographer choreographer;
+    private android.view.Choreographer.FrameCallback vsyncTick;
+    private volatile boolean vsyncRunning = false;
+
+    private void startVsyncTimebase() {
+        choreographer = android.view.Choreographer.getInstance();
+        vsyncRunning = true;
+        vsyncTick = new android.view.Choreographer.FrameCallback() {
+            @Override public void doFrame(long frameTimeNanos) {
+                if (!vsyncRunning) return;
+                if (nativeHandle != 0) nativeSetVsyncNs(nativeHandle, frameTimeNanos);
+                choreographer.postFrameCallback(this);
+            }
+        };
+        choreographer.postFrameCallback(vsyncTick);
+    }
+
+    private void stopVsyncTimebase() {
+        vsyncRunning = false;
+        if (choreographer != null && vsyncTick != null) choreographer.removeFrameCallback(vsyncTick);
+        choreographer = null; vsyncTick = null;
     }
 
     // Stage-timing instrumentation (temporary, for localizing the multi-second BLAST
@@ -85,38 +122,30 @@ public class GLFanoutManager implements SurfaceTexture.OnFrameAvailableListener 
             surfaceTexture.getTransformMatrix(texMatrix);
             long now = t1;
             long t2, t3;
-            // Gate the display swap with SLACK, not at exactly one refresh interval.
+            // NO display gate. Swap EVERY decoded frame; the presentation timestamp decides when
+            // each one is shown (GLFanoutRenderer::stampDisplayPresentationTime).
             //
-            // When the stream rate equals the panel rate (the normal case: 90 fps on 90 Hz, after
-            // matchDisplayToStreamFps), frames arrive ~one interval apart with a little jitter. An
-            // exact ">= interval" test then skips every frame that lands even fractionally early,
-            // and the following one arrives ~2 intervals later — a beat that silently dropped about
-            // a third of the frames. Measured on device: codec renderFps=90 discardFps=0 while the
-            // video SurfaceView received only 57-60 fps with inter-frame gaps of 10 ms or 22-33 ms.
-            // That was the constant judder.
+            // A wall-clock gate here is actively harmful now. The decoder delivers in BURSTS (two
+            // frames ~0.1 ms apart, then a ~22 ms gap — visible as min=0.08-0.35 ms in the
+            // BufferQueue stats), so a "≥ one refresh since the last swap" test throws away the
+            // second frame of every burst: measured a hard ceiling of ~60 of 90 fps presented, with
+            // the missing frames being exactly the ones the timestamps exist to place on their own
+            // vsync.
             //
-            // A quarter-interval of slack lets a marginally-early frame through while still dropping
-            // frames when the source genuinely outruns the panel. BLAST still can't be overfilled:
-            // the renderer now swaps with vsync pacing (GLFanoutRenderer swapInterval 1), so
-            // eglSwapBuffers itself blocks until the next refresh.
-            final long slackNs = DISPLAY_INTERVAL_NS / 4;
-            boolean didSwap = now - lastDisplayNs >= DISPLAY_INTERVAL_NS - slackNs;
-            if (!didSwap) {
-                // Encode-only: feed the DVR at full rate, don't swap to display
-                t2 = System.nanoTime();
-                nativeRenderFrameEncodeOnly(nativeHandle, texMatrix);
-                t3 = System.nanoTime();
-            } else {
-                lastDisplayNs = now;
-                t2 = System.nanoTime();
-                nativeRenderFrame(nativeHandle, texMatrix);
-                t3 = System.nanoTime();
-            }
+            // The gate was originally there to stop BLAST exhaustion, which only happens when the
+            // swap BLOCKS and back-pressures this thread (that is what killed the Swappy attempt:
+            // NO_BUFFER_AVAILABLE, 3-9 s freezes). eglPresentationTimeANDROID does not block — it
+            // just labels the buffer — so the queue drains on its own. Watch for
+            // "NO_BUFFER_AVAILABLE"/"didn't commit buffer" in logcat; if it ever appears, add sync
+            // fences (Swappy's leg 3) rather than re-introducing a frame-dropping gate.
+            t2 = System.nanoTime();
+            nativeRenderFrame(nativeHandle, texMatrix);   // display (timestamped) + DVR encoder
+            t3 = System.nanoTime();
             long dUpdate = t1 - t0, dRender = t3 - t2;
             if (dUpdate > STAGE_WARN_NS || dRender > STAGE_WARN_NS) {
                 android.util.Log.w("GLFanoutStage",
                     "slow stage: updateTexImage=" + (dUpdate / 1_000_000) + "ms render="
-                    + (dRender / 1_000_000) + "ms (display=" + (didSwap ? "swap" : "skip") + ")");
+                    + (dRender / 1_000_000) + "ms");
             }
         } catch (Exception e) { /* SurfaceTexture released — ignore */ }
     }
@@ -137,6 +166,9 @@ public class GLFanoutManager implements SurfaceTexture.OnFrameAvailableListener 
                 // onFrameAvailable fires on glHandler thread — render DIRECTLY, no post()
                 surfaceTexture.setOnFrameAvailableListener(this, glHandler);
                 inputSurface = new Surface(surfaceTexture);
+                sInstance = this;
+                nativeSetRefreshNs(nativeHandle, DISPLAY_INTERVAL_NS);
+                startVsyncTimebase();   // on the GL thread: it owns a Looper (HandlerThread)
                 ok[0] = true;
             }
             latch.countDown();
@@ -210,6 +242,7 @@ public class GLFanoutManager implements SurfaceTexture.OnFrameAvailableListener 
     public void release() {
         if (glHandler != null) {
             glHandler.post(() -> {
+                stopVsyncTimebase();   // same thread that posted the callbacks
                 if (inputSurface != null)   { inputSurface.release();   inputSurface = null; }
                 if (surfaceTexture != null) { surfaceTexture.release(); surfaceTexture = null; }
                 if (nativeHandle != 0)      { nativeRelease(nativeHandle); nativeHandle = 0; }
@@ -229,6 +262,8 @@ public class GLFanoutManager implements SurfaceTexture.OnFrameAvailableListener 
     private native void nativeSetDisplay2(long handle, Surface displaySurface2);
     private native void nativeSetRecordOsd(long handle, boolean on);
     private native void nativeUpdateOsd(long handle, Bitmap osd);
+    private native void nativeSetVsyncNs(long handle, long frameTimeNs);
+    private native void nativeSetRefreshNs(long handle, long ns);
     private native void nativeRenderFrame(long handle, float[] texMatrix);
     private native void nativeRenderFrameEncodeOnly(long handle, float[] texMatrix);
     private native void nativeRelease(long handle);

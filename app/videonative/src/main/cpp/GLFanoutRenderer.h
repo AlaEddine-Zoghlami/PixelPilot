@@ -83,6 +83,25 @@ class GLFanoutRenderer
 
     GLuint oesTexture() const { return oesTex_; }
 
+    // --- Display frame pacing: presentation timestamps on a Choreographer timebase ------------
+    // Legs 1+2 of what Android Frame Pacing (Swappy) does, without leg 3 (sync fences) and
+    // crucially WITHOUT Swappy's blocking swap. Swappy paces by blocking the render thread; ours
+    // is the SurfaceTexture consumer thread, so blocking it backpressures the decoder and exhausts
+    // the BLAST queue (measured: "NO_BUFFER_AVAILABLE", 3-9 s freezes). eglPresentationTimeANDROID
+    // only ATTACHES a target time to the buffer and returns immediately, so it paces presentation
+    // without ever stalling decode.
+    //
+    // What it fixes: with no timestamp, SurfaceFlinger latches whatever buffer is newest at each
+    // vsync, so when two frames land in one interval the older is dropped and when none lands the
+    // previous is held — the documented "frames skipping display cycles" case, and why the video
+    // SurfaceView only received 57-60 of 90 decoded fps.
+
+    /** Latest Choreographer vsync time (CLOCK_MONOTONIC ns, same timebase as System.nanoTime and
+     *  as eglPresentationTimeANDROID). Fed ~once per refresh from GLFanoutManager. */
+    void setVsyncNs(int64_t frameTimeNs) { vsyncNs_.store(frameTimeNs); }
+    /** Display refresh period (ns) for the mode the app negotiated. */
+    void setRefreshNs(uint64_t ns) { if (ns > 0) refreshNs_.store(ns); }
+
     void setEncoderWindow(ANativeWindow* encWindow)
     {
         if (encSurf_ != EGL_NO_SURFACE) { eglDestroySurface(egl_, encSurf_); encSurf_ = EGL_NO_SURFACE; }
@@ -160,6 +179,7 @@ class GLFanoutRenderer
         eglQuerySurface(egl_, dispSurf_, EGL_WIDTH, &vpW_);
         eglQuerySurface(egl_, dispSurf_, EGL_HEIGHT, &vpH_);
         drawOes(texMatrix, /*withOsd=*/false);
+        stampDisplayPresentationTime();
         eglSwapBuffers(egl_, dispSurf_);
         // VR: render the SAME decoded frame to the second eye's display surface. One decode,
         // two displays — avoids a second HEVC decoder (which on MTK is SW-only and can't sustain
@@ -186,6 +206,51 @@ class GLFanoutRenderer
         encodePass(encSurfRaw_, false,             texMatrix);
     }
 
+    // Resolve eglPresentationTimeANDROID once. Already used for the encoder surfaces (a
+    // surface-input MediaCodec needs a PTS or it emits nothing); now also for the display.
+    static auto presentationTimeFn()
+    {
+        static auto fn = (EGLBoolean (*)(EGLDisplay, EGLSurface, EGLnsecsANDROID))
+                         eglGetProcAddress("eglPresentationTimeANDROID");
+        return fn;
+    }
+
+    // Tell SurfaceFlinger the vsync this frame is FOR, so it is not presented early and does not
+    // skip a display cycle. Target = the first vsync boundary at least a fraction of a period away
+    // (a frame handed in right at a boundary can miss that composition, so aim at the next one).
+    // No-ops until the first Choreographer tick has arrived, or if the extension is missing.
+    void stampDisplayPresentationTime()
+    {
+        auto fn = presentationTimeFn();
+        const int64_t base = vsyncNs_.load();
+        if (!fn || base == 0) return;
+        const int64_t period = (int64_t) refreshNs_.load();
+        if (period <= 0) return;
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);   // same timebase as Choreographer's frameTimeNanos
+        const int64_t now = (int64_t) ts.tv_sec * 1000000000LL + ts.tv_nsec;
+        // Number of whole periods from the last known vsync to just past "now + 20% of a period".
+        const int64_t ahead = now + period / 5 - base;
+        int64_t k = ahead > 0 ? (ahead + period - 1) / period : 0;
+        int64_t target = base + k * period;
+        // Force targets to be STRICTLY one period apart. `base` is only refreshed by the
+        // Choreographer callback, which lands on this same (render-busy) thread and so can be a
+        // tick stale; two consecutive frames then round to the SAME vsync, the second replaces the
+        // first in the queue, and half the frames vanish — measured as a rock-steady 60-65 fps out
+        // of 90 with max exactly 33 ms (3 vsyncs). Chaining from the previous target instead makes
+        // one frame map to one vsync. If we drift more than a few frames behind real time (a stall,
+        // a link gap), abandon the chain and resync to the computed target.
+        const int64_t prev = lastTargetNs_;
+        if (prev != 0 && target <= prev) target = prev + period;   // strictly increasing
+        // Never aim more than ~2 refreshes ahead. A BufferQueue only holds a couple of buffers, so
+        // queueing far into the future starves it and we start dropping instead of pacing — the
+        // earlier 4-period allowance pinned presentation at a steady 60 of 90 fps. If the chain has
+        // run ahead (we render marginally faster than the panel, or a gap moved real time), resync.
+        if (target > now + 2 * period) target = now + period;
+        lastTargetNs_ = target;
+        fn(egl_, dispSurf_, (EGLnsecsANDROID) target);
+    }
+
     // One encoder pass: render the frame (+ OSD when withOsd) into a MediaCodec input EGL surface.
     void encodePass(EGLSurface surf, bool withOsd, const float texMatrix[16])
     {
@@ -195,8 +260,8 @@ class GLFanoutRenderer
         eglQuerySurface(egl_, surf, EGL_HEIGHT, &vpH_);
         drawOes(texMatrix, withOsd);
         // Surface-input encoders need a per-frame presentation timestamp or they emit no output.
-        static auto eglPresTime = (EGLBoolean (*)(EGLDisplay, EGLSurface, EGLnsecsANDROID))
-                                  eglGetProcAddress("eglPresentationTimeANDROID");
+        // "now" (not a future vsync) — the recording wants real capture times, not display timing.
+        auto eglPresTime = presentationTimeFn();
         struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
         if (eglPresTime) eglPresTime(egl_, surf, (EGLnsecsANDROID) ts.tv_sec * 1000000000LL + ts.tv_nsec);
         eglSwapBuffers(egl_, surf);
@@ -370,6 +435,14 @@ class GLFanoutRenderer
     EGLint     vpW_ = 0, vpH_ = 0;
     int        osdTexW_ = 0, osdTexH_ = 0;
     std::atomic<bool> ready_{false};
+    // Vsync timebase for display presentation timestamps (see stampDisplayPresentationTime).
+    // 0 = no Choreographer tick yet, so don't stamp. Default period = 90 Hz, the usual APFPV
+    // stream rate; corrected by setRefreshNs() once the app knows the negotiated display mode.
+    std::atomic<int64_t>  vsyncNs_{0};
+    std::atomic<uint64_t> refreshNs_{11111111ULL};
+    // Last presentation target handed to EGL, so the next one can be chained exactly one period
+    // later. GL-thread only (stampDisplayPresentationTime), hence plain.
+    int64_t               lastTargetNs_ = 0;
     std::atomic<bool> recordOsd_{false};
     GLFanoutEncoder   encoder_;
     GLFanoutEncoder   encoderRaw_;
