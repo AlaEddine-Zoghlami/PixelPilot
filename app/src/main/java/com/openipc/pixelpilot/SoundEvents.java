@@ -55,38 +55,93 @@ public final class SoundEvents {
     public void setPlayer(SoundPlayer sp) { this.player = sp::play; }
 
     // ---- Stateful battery announcer ---------------------------------------------------
-    // The old timer-repeat battery rules looped ("battery low" every N seconds) and spoke the
-    // raw voltage (0 when no battery / a bad OSD read). This is a proper state machine instead:
-    // it detects the cell count, tracks a per-cell alert LEVEL, announces each lower level exactly
-    // ONCE, never repeats or goes back up within a flight, and resets on a fresh arm. It ignores an
-    // absent/implausible voltage entirely (no bench spam, no "zero"), and only runs while armed.
-    private int battLevel = 0;              // 0 ok, 1 low, 2 critical, 3 land-now
-    private int battCells = 0;              // detected on the first valid armed reading
+    // Detect the cell count, estimate remaining charge from per-cell voltage, and announce only
+    // descending 20% steps (80, 60, 40, 20). After 20%, wait for the separate low-battery warning;
+    // never announce 0%. The first valid armed reading establishes the baseline. Recovery/load-sag
+    // cannot re-announce an earlier step. Invalid voltage is ignored, and state resets when armed.
+    private int battPercentStep = -1;
+    private int battCells = 0;
     private boolean battWasArmed = false;
-    private int battPendLevel = 0, battPendCount = 0;   // 2-reading confirm vs load sag
+    private int battPendStep = -1, battPendCount = 0;   // 2-reading confirmation vs load sag
+    private boolean battLowAnnounced = false;
+    private int battLowPendCount = 0;
 
     private void evaluateBattery(Vars v) {
         boolean armed = v.haveArmed && v.armed;
-        if (armed && !battWasArmed) { battLevel = 0; battCells = 0; battPendLevel = 0; battPendCount = 0; }
+        if (armed && !battWasArmed) {
+            battPercentStep = -1;
+            battCells = 0;
+            battPendStep = -1;
+            battPendCount = 0;
+            battLowAnnounced = false;
+            battLowPendCount = 0;
+        }
         battWasArmed = armed;
         Double vb = v.get("vbat");
-        if (!armed || vb == null || vb < 5.0) { battPendCount = 0; return; }   // not flying / no real pack
+        if (!armed || vb == null || vb < 5.0) {
+            battPendCount = 0;
+            battLowPendCount = 0;
+            return;
+        }
         if (battCells <= 0) battCells = Math.max(1, (int) Math.ceil(vb / 4.25));
         double perCell = vb / battCells;
-        int level = perCell < 3.0 ? 3 : perCell < 3.3 ? 2 : perCell < 3.5 ? 1 : 0;
-        if (level <= battLevel) { battPendCount = 0; return; }   // same / recovered -> no re-announce
-        // Confirm the worse level across two readings so a momentary sag under load doesn't false-fire.
-        if (level == battPendLevel) battPendCount++; else { battPendLevel = level; battPendCount = 1; }
-        if (battPendCount < 2) return;
-        battLevel = level;
-        List<String> clips = new ArrayList<>();
-        switch (level) {
-            case 1:  clips.add("lowbat.wav"); break;                              // "low battery"
-            case 2:  clips.add("batalert.wav"); break;                            // "battery alert"
-            default: clips.add("batalert.wav"); clips.add("warnng.wav"); break;   // "battery alert, warning"
+
+        int percent = batteryPercent(perCell);
+        // A level remains in its upper bucket until that boundary is reached: 100 -> 80 when
+        // remaining charge reaches 80%, then 80 -> 60 at 60%, and so on.
+        int step = Math.max(20, percent == 0 ? 0 : ((percent + 19) / 20) * 20);
+        if (battPercentStep < 0) {
+            battPercentStep = step;              // establish the flight's starting level silently
+            return;
         }
-        Log.i(TAG, "battery level " + level + " (" + String.format(java.util.Locale.US, "%.2fV/cell, %dS", perCell, battCells) + ") -> " + clips);
-        if (player != null) player.play(clips);
+        if (step < battPercentStep) {
+            // Confirm a lower step across two readings so momentary voltage sag does not false-fire.
+            if (step == battPendStep) battPendCount++; else { battPendStep = step; battPendCount = 1; }
+            if (battPendCount >= 2) {
+                battPercentStep = step;
+                battPendCount = 0;
+                List<String> clips = new ArrayList<>();
+                clips.add("battry.wav");
+                clips.add(String.format(java.util.Locale.US, "num/%04d.wav", step));
+                clips.add("percent0.wav");
+                Log.i(TAG, "battery " + step + "% (" + String.format(java.util.Locale.US,
+                        "%.2fV/cell, %dS", perCell, battCells) + ") -> " + clips);
+                if (player != null) player.play(clips);
+                return; // Do not queue "20 percent" and "low battery" together.
+            }
+        } else {
+            battPendCount = 0;
+        }
+
+        // Final stage: after 20%, announce low battery once instead of announcing 0%.
+        if (!battLowAnnounced && battPercentStep == 20 && perCell < 3.50) {
+            if (++battLowPendCount >= 2) {
+                battLowAnnounced = true;
+                battLowPendCount = 0;
+                List<String> clips = new ArrayList<>();
+                clips.add("lowbat.wav");
+                Log.i(TAG, "low battery (" + String.format(java.util.Locale.US,
+                        "%.2fV/cell, %dS", perCell, battCells) + ") -> " + clips);
+                if (player != null) player.play(clips);
+            }
+        } else {
+            battLowPendCount = 0;
+        }
+    }
+
+    /** Approximate LiPo resting state-of-charge from per-cell voltage using a monotonic curve. */
+    private static int batteryPercent(double volts) {
+        final double[] voltage = { 3.30, 3.65, 3.75, 3.85, 4.00, 4.20 };
+        final int[] percent =    {    0,   20,   40,   60,   80,  100 };
+        if (volts <= voltage[0]) return 0;
+        if (volts >= voltage[voltage.length - 1]) return 100;
+        for (int i = 1; i < voltage.length; i++) {
+            if (volts <= voltage[i]) {
+                double f = (volts - voltage[i - 1]) / (voltage[i] - voltage[i - 1]);
+                return (int) Math.round(percent[i - 1] + f * (percent[i] - percent[i - 1]));
+            }
+        }
+        return 100;
     }
 
     // ---- OSD run parser: one WRITE_STRING run -> at most one variable ------------------
