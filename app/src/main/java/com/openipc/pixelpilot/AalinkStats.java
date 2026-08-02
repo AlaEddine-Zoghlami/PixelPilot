@@ -36,6 +36,12 @@ public final class AalinkStats {
     public volatile int up = -1, down = -1, mcs = -1, kbps = -1, bw = -1, ch = -1, txpwr = -1, q = -1;
     // Real streamed fps (venc) + SoC temperature (°C) — appended by the VTX aalink_udp relay.
     public volatile int fps = -1, tempC = -1;
+    // aalink's WARNING-class signals. These were reaching us all along in aalink_ext.msg but had no
+    // case in parse(), so they fell through `default: break;` and never surfaced anywhere -- the
+    // Windows GS shows them, Android silently dropped them. antenna_mismatch is aalink's own
+    // persistent RSSI_A/RSSI_B imbalance verdict (it prints "Check VTX antennas!" on the air side),
+    // reduced_power_mode is the HIGH_TEMP thermal throttle, cuts is the ENABLE_FPS_CUT counter.
+    public volatile int antMismatch = -1, reducedPower = -1, cuts = -1;
     private volatile long lastOkMs = 0;
     private int fails = 0;
 
@@ -115,18 +121,46 @@ public final class AalinkStats {
                 case "q":          q = iv; break;
                 case "fps":        fps = iv; break;     // real streamed fps (venc Fps_1s)
                 case "temp_c":     tempC = iv; break;   // SoC temperature °C
+                case "antenna_mismatch":   antMismatch = iv; break;
+                case "reduced_power_mode": reducedPower = iv; break;
+                case "cuts":               cuts = iv; break;
                 default: break;
             }
         }
     }
 
+    /**
+     * aalink's active warnings, or "" when there are none / the feed is stale.
+     *
+     * <p>Wording for the antenna case is aalink's own, so the OSD reads the same as the air-side log
+     * and the Windows GS. Only flags that are actually set are emitted, so this is empty in normal
+     * flight and callers can test it with {@code isEmpty()} to decide whether to draw anything.
+     */
+    public String warnings() {
+        if (!fresh()) return "";
+        StringBuilder b = new StringBuilder();
+        if (antMismatch > 0) b.append("Warning! Check VTX antennas! Persistent mismatch detected");
+        if (reducedPower > 0) {
+            if (b.length() > 0) b.append("  ");
+            // Include the temperature that triggered it -- "why" is the whole value of the warning.
+            b.append("REDUCED POWER (thermal").append(tempC < 0 ? "" : " " + tempC + "°C").append(")");
+        }
+        return b.toString();
+    }
+
+    /** True while aalink is reporting at least one warning. */
+    public boolean hasWarning() { return !warnings().isEmpty(); }
+
     /** The status line, formatted like the one msposd used to burn into the video. */
     public String line() {
         if (!fresh()) return "aalink --";
-        return "LQ up:" + pct(up) + " dn:" + pct(down)
+        String w = warnings();
+        return (w.isEmpty() ? "" : w + "\n")
+                + "LQ up:" + pct(up) + " dn:" + pct(down)
                 + " | MCS:" + (mcs < 0 ? "--" : mcs)
                 + " | " + (kbps < 0 ? "--" : kbps) + "kbps"
                 + (fps < 0 ? "" : " | " + fps + "fps")
+                + (cuts > 0 ? " | cuts:" + cuts : "")   // matches aalink's own " | cuts:%d"
                 + " | Ch:" + (ch < 0 ? "--" : ch) + "-" + (bw < 0 ? "--" : bw) + "mhz"
                 + " | tx" + (txpwr < 0 ? "--" : txpwr) + "dBm"
                 + (tempC < 0 ? "" : " | " + tempC + "°C");
