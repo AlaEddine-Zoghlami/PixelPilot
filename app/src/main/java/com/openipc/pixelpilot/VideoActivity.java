@@ -140,7 +140,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
 
     public static int getChannel(Context context) {
         return context.getSharedPreferences("general",
-                Context.MODE_PRIVATE).getInt("wifi-channel", 161);
+                Context.MODE_PRIVATE).getInt("wifi-channel", 36);
     }
 
     public static int getBandwidth(Context context) {
@@ -247,6 +247,20 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
     }
 
     // Lifecycle - onCreate
+
+    private boolean hasDvrFolder() {
+        return getSharedPreferences("general", Context.MODE_PRIVATE)
+                .getString("dvr_folder_", null) != null;
+    }
+    private void maybePromptDvrFolder() {
+        if (hasDvrFolder()) return;
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+        intent.addCategory(Intent.CATEGORY_DEFAULT);
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION |
+                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION |
+                        Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        try { startActivityForResult(intent, PICK_DVR_REQUEST_CODE); } catch (Exception ignored) {}
+    }
 
     @SuppressLint("ClickableViewAccessibility")
     @Override
@@ -370,7 +384,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
                     Toast.makeText(VideoActivity.this, "APFPV Wi-Fi: " + d, Toast.LENGTH_LONG).show()); }
             });
         String savedMode = getSharedPreferences("pixelpilot", MODE_PRIVATE)
-                        .getString("link_mode", "wfb");
+                        .getString("link_mode", "apfpv");   // default: dongle-as-station to the VTX AP
         linkMode = "apfpv".equals(savedMode) ? LinkModeCoordinator.Mode.APFPV
                  : "apfpv_wifi".equals(savedMode) ? LinkModeCoordinator.Mode.APFPV_WIFI
                  : LinkModeCoordinator.Mode.WFB;
@@ -664,6 +678,8 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
 
         // Bandwidth submenu — 20/40/80 MHz (must match the VTX's actual operating width)
         setupBandwidthSubMenu(popup);
+        setupOsdFontSubMenu(popup);
+        setupSoundSubMenu(popup);
 
         // OSD submenu
         setupOSDSubMenu(popup);
@@ -672,14 +688,8 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         setupColortransSubMenu(popup);
 
         // Route VTX (192.168.0.1) SSH/HTTP through the dongle so menu settings apply on the
-        // dongle path. APFPV dongle-station only: ApfpvVpnService bridges through
-        // ApfpvStation's CCMP link (ApfpvStaLink.leaseIp()) specifically -- meaningless in
-        // WFB-ng mode (different link, its own VpnService starts automatically, no manual
-        // toggle) and in phone-Wi-Fi mode (no dongle; the phone's own Wi-Fi already routes
-        // to the VTX directly).
-        if (linkMode == LinkModeCoordinator.Mode.APFPV) {
-            setupVtxRouteSubMenu(popup);
-        }
+        // dongle path (not just phone-Wi-Fi). No-op unless the dongle link is up.
+        setupVtxRouteSubMenu(popup);
 
         // Video flush (ms) — MediaTek only (the stale-frame flush is on the MTK decode path).
         if (isMtkDevice()) {
@@ -701,9 +711,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         // Recording submenu
         setupRecordingSubMenu(popup);
 
-        // Drone submenu — opens the drone's web config UI. startBrowser() picks the right
-        // host per mode (wfb-ng's tunnel gateway 10.5.0.10, or APFPV's VTX address
-        // 192.168.0.1), so this is relevant in every mode.
+        // Drone submenu
         setupDroneSubMenu(popup);
 
         // UDP Forwarding submenu
@@ -718,6 +726,43 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
     /**
      * Submenu that toggles VR mode.
      */
+    /** OSD font picker. The atlases live in assets/fonts/ (4-page HD Betaflight atlases,
+     *  the same layout MspOsdCanvas derives glyph size from). The chosen asset name is
+     *  persisted and re-loaded by buildOsdViews; changing it rebuilds the OSD canvas live. */
+    private static final String[] OSD_FONTS = {
+        "BTFL_default", "BTFL_BLINDER_HD", "BTFL_CLASH_HD", "BTFL_CONTHRAX_HD",
+        "BTFL_EUROPA_HD", "BTFL_NEXUS_HD", "BTFL_SPHERE_HD"
+    };
+    public static String getOsdFont(Context ctx) {
+        return ctx.getSharedPreferences("general", MODE_PRIVATE).getString("osd-font", "BTFL_default");
+    }
+    private void setupOsdFontSubMenu(PopupMenu popup) {
+        SubMenu m = popup.getMenu().addSubMenu("OSD font");
+        String cur = getOsdFont(this);
+        MenuItem hdr = m.add("Current: " + cur); hdr.setEnabled(false);
+        for (String f : OSD_FONTS) {
+            m.add(f).setOnMenuItemClickListener(item -> {
+                getSharedPreferences("general", MODE_PRIVATE).edit().putString("osd-font", f).apply();
+                // rebuild the OSD with the new font on the UI thread
+                runOnUiThread(() -> { if (osdCanvas != null) { buildOsdViews(); } });
+                return true;
+            });
+        }
+    }
+
+    /** Voice-alert on/off. Persisted; applies live to the running SoundPlayer. */
+    private void setupSoundSubMenu(PopupMenu popup) {
+        SubMenu m = popup.getMenu().addSubMenu("Voice alerts");
+        boolean on = getSoundEnabled(this);
+        MenuItem hdr = m.add("Now: " + (on ? "ON" : "OFF")); hdr.setEnabled(false);
+        m.add("On").setOnMenuItemClickListener(i -> { setSound(true); return true; });
+        m.add("Off").setOnMenuItemClickListener(i -> { setSound(false); return true; });
+    }
+    private void setSound(boolean on) {
+        getSharedPreferences("general", MODE_PRIVATE).edit().putBoolean("sound-alerts", on).apply();
+        if (soundPlayer != null) soundPlayer.setEnabled(on);
+    }
+
     private void setupVRSubMenu(PopupMenu popup) {
         SubMenu vrMenu = popup.getMenu().addSubMenu("VR mode");
         MenuItem vrItem = vrMenu.add(getVRSetting() ? "On" : "Off");
@@ -955,11 +1000,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
             if (devIdx >= 0) adaptiveTxPower = devIdx;
         }
 
-        // Adaptive link Enable option -- WFB-ng's own adaptive-FEC/rate mechanism
-        // (nativeSetAdaptiveLinkEnabled on the WfbNgLink instance); APFPV has no
-        // equivalent concept (its link-quality/rate adaptation runs through aalink over
-        // SSH instead), so this toggle was previously a silent no-op in APFPV modes.
-        if (linkMode == LinkModeCoordinator.Mode.WFB) {
+        // Adaptive link Enable option
         MenuItem adaptiveEnable = adaptiveMenu.add("Enable");
         adaptiveEnable.setCheckable(true);
         adaptiveEnable.setChecked(adaptiveEnabled);
@@ -973,7 +1014,6 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
             wfbLink.nativeSetAdaptiveLinkEnabled(newState);
             return true;
         });
-        }
 
         // Adaptive link Power submenu
         SubMenu powerSubMenu = adaptiveMenu.addSubMenu("Power");
@@ -1044,10 +1084,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
             return true;
         });
 
-        // Adaptive use FEC submenu -- FEC/LDPC/STBC are wfb-ng's own PHY/FEC knobs
-        // (TxArgs.fec/ldpc/stbc in WfbngLink.cpp); APFPV has no app-side FEC or these
-        // PHY toggles, so gate the whole block to WFB-ng mode.
-        if (linkMode == LinkModeCoordinator.Mode.WFB) {
+        // Adaptive use FEC submenu
         boolean fecEnabled = prefs.getBoolean("custom_fec_enabled", true);
 
         MenuItem fecEnable = adaptiveMenu.add("FEC");
@@ -1099,7 +1136,6 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
             showFecThresholdsDialog();
             return true;
         });
-        }
     }
 
     // Show dialog to configure FEC thresholds for all levels
@@ -1298,82 +1334,73 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
                 .getFloat("antenna_gain_db", (float) com.openipc.pixelpilot.apfpv.RfLimits.DEFAULT_ANTENNA_GAIN_DB);
         m.add(String.format(java.util.Locale.US, "Antenna gain: %.0f dBi…", gainNow))
             .setOnMenuItemClickListener(i -> { showAntennaGainDialog(); return true; });
-        // One-tap DE legal APFPV RF, VRX beacon cal, dongle AP test, and Reconnect/adapter-list
-        // all drive the RTL8812 dongle directly (apfpvLinkManager.setChannel/setBandwidth,
-        // startBeaconCal, startDongleAp, refreshAdapters, WlxAdapters) — meaningless with no
-        // dongle attached, so gate on the dongle-station mode specifically, not the broader
-        // apfpvMode (which also covers phone-Wi-Fi, no dongle). Phone-Wi-Fi's TX power/channel
-        // are OS-controlled; see the Adaptive-link "TX power fixed in phone-Wi-Fi" toast.
-        if (linkMode == LinkModeCoordinator.Mode.APFPV) {
-            // 5.2 GHz UNII-1 ch40 (centered, in 5170-5250), 20 MHz (200 mW EIRP under the PSD
-            // cap). TX index derived from 200 mW EIRP MINUS the configured antenna gain. EIRP
-            // still depends on the real antenna — verify.
-            m.add("Apply DE legal limits").setOnMenuItemClickListener(i -> {
-                float gain = getSharedPreferences("pixelpilot", MODE_PRIVATE)
-                        .getFloat("antenna_gain_db", (float) com.openipc.pixelpilot.apfpv.RfLimits.DEFAULT_ANTENNA_GAIN_DB);
-                int idx = com.openipc.pixelpilot.apfpv.RfLimits.legalIndex(
-                        com.openipc.pixelpilot.apfpv.RfLimits.EIRP_APFPV_DBM, gain);
-                double cond = com.openipc.pixelpilot.apfpv.RfLimits.conductedDbm(
-                        com.openipc.pixelpilot.apfpv.RfLimits.EIRP_APFPV_DBM, gain);
-                getSharedPreferences("pixelpilot", MODE_PRIVATE).edit()
-                    .putInt("apfpv_channel", 40).putInt("apfpv_bandwidth", 20).apply();
-                getSharedPreferences("general", MODE_PRIVATE).edit()
-                    .putInt("adaptive_tx_power", idx).apply();
-                if (apfpvLinkManager != null) {
-                    apfpvLinkManager.setChannel(40);
-                    apfpvLinkManager.setBandwidth(20);
+        // One-tap DE legal APFPV RF (dongle only — phone-Wi-Fi mode is regulated by
+        // the OS). 5.2 GHz UNII-1 ch40 (centered, in 5170-5250), 20 MHz (200 mW
+        // EIRP under the PSD cap). TX index derived from 200 mW EIRP MINUS the
+        // configured antenna gain. EIRP still depends on the real antenna — verify.
+        m.add("Apply DE legal limits").setOnMenuItemClickListener(i -> {
+            float gain = getSharedPreferences("pixelpilot", MODE_PRIVATE)
+                    .getFloat("antenna_gain_db", (float) com.openipc.pixelpilot.apfpv.RfLimits.DEFAULT_ANTENNA_GAIN_DB);
+            int idx = com.openipc.pixelpilot.apfpv.RfLimits.legalIndex(
+                    com.openipc.pixelpilot.apfpv.RfLimits.EIRP_APFPV_DBM, gain);
+            double cond = com.openipc.pixelpilot.apfpv.RfLimits.conductedDbm(
+                    com.openipc.pixelpilot.apfpv.RfLimits.EIRP_APFPV_DBM, gain);
+            getSharedPreferences("pixelpilot", MODE_PRIVATE).edit()
+                .putInt("apfpv_channel", 40).putInt("apfpv_bandwidth", 20).apply();
+            getSharedPreferences("general", MODE_PRIVATE).edit()
+                .putInt("adaptive_tx_power", idx).apply();
+            if (apfpvLinkManager != null) {
+                apfpvLinkManager.setChannel(40);
+                apfpvLinkManager.setBandwidth(20);
+            }
+            if (apfpvLink != null) apfpvLink.setTxPower(idx);
+            android.widget.Toast.makeText(this, String.format(java.util.Locale.US,
+                "APFPV → DE legal: 5.2 GHz ch40, 20 MHz. 200 mW EIRP − %.0f dB ant = %.0f dBm conducted (TX idx %d, ~%d mW). Verify w/ a meter. Reconnect to apply.",
+                gain, cond, idx, com.openipc.pixelpilot.apfpv.RfLimits.mw(cond)),
+                android.widget.Toast.LENGTH_LONG).show();
+            return true;
+        });
+        m.add("EIRP estimate…").setOnMenuItemClickListener(i -> { showEirpEstimatorDialog(); return true; });
+        // Master phone (with dongle): broadcast a hardcoded SSID so a SECOND phone
+        // (no dongle, ~2 m away) can EIRP-estimate this dongle's output.
+        m.add(vrxBeaconOn ? "VRX beacon (cal): ON — tap to stop" : "VRX beacon (cal): start")
+            .setOnMenuItemClickListener(i -> {
+                if (apfpvLinkManager == null) return true;
+                if (vrxBeaconOn) {
+                    apfpvLinkManager.stopBeaconCal(); vrxBeaconOn = false;
+                    Toast.makeText(this, "VRX beacon stopped", Toast.LENGTH_SHORT).show();
+                } else {
+                    int ch  = getSharedPreferences("pixelpilot", MODE_PRIVATE).getInt("apfpv_channel", 40);
+                    int idx = getSharedPreferences("general", MODE_PRIVATE).getInt("adaptive_tx_power", 20);
+                    vrxBeaconOn = apfpvLinkManager.startBeaconCal(VRX_CAL_SSID, ch, idx);
+                    if (vrxBeaconOn) Toast.makeText(this, String.format(java.util.Locale.US,
+                        "Beaconing \"%s\" ch%d, TX idx %d. On the 2nd phone (no dongle): EIRP estimate → pick \"%s\" → enter ~2 m.",
+                        VRX_CAL_SSID, ch, idx, VRX_CAL_SSID), Toast.LENGTH_LONG).show();
                 }
-                if (apfpvLink != null) apfpvLink.setTxPower(idx);
-                android.widget.Toast.makeText(this, String.format(java.util.Locale.US,
-                    "APFPV → DE legal: 5.2 GHz ch40, 20 MHz. 200 mW EIRP − %.0f dB ant = %.0f dBm conducted (TX idx %d, ~%d mW). Verify w/ a meter. Reconnect to apply.",
-                    gain, cond, idx, com.openipc.pixelpilot.apfpv.RfLimits.mw(cond)),
-                    android.widget.Toast.LENGTH_LONG).show();
                 return true;
             });
-        }
-        m.add("EIRP estimate…").setOnMenuItemClickListener(i -> { showEirpEstimatorDialog(); return true; });
-        if (linkMode == LinkModeCoordinator.Mode.APFPV) {
-            // Master phone (with dongle): broadcast a hardcoded SSID so a SECOND phone
-            // (no dongle, ~2 m away) can EIRP-estimate this dongle's output.
-            m.add(vrxBeaconOn ? "VRX beacon (cal): ON — tap to stop" : "VRX beacon (cal): start")
-                .setOnMenuItemClickListener(i -> {
-                    if (apfpvLinkManager == null) return true;
-                    if (vrxBeaconOn) {
-                        apfpvLinkManager.stopBeaconCal(); vrxBeaconOn = false;
-                        Toast.makeText(this, "VRX beacon stopped", Toast.LENGTH_SHORT).show();
-                    } else {
-                        int ch  = getSharedPreferences("pixelpilot", MODE_PRIVATE).getInt("apfpv_channel", 40);
-                        int idx = getSharedPreferences("general", MODE_PRIVATE).getInt("adaptive_tx_power", 20);
-                        vrxBeaconOn = apfpvLinkManager.startBeaconCal(VRX_CAL_SSID, ch, idx);
-                        if (vrxBeaconOn) Toast.makeText(this, String.format(java.util.Locale.US,
-                            "Beaconing \"%s\" ch%d, TX idx %d. On the 2nd phone (no dongle): EIRP estimate → pick \"%s\" → enter ~2 m.",
-                            VRX_CAL_SSID, ch, idx, VRX_CAL_SSID), Toast.LENGTH_LONG).show();
-                    }
-                    return true;
-                });
-            // WIP: bring the DONGLE up as a Wi-Fi AP (SoftAP) so a second device can associate — the
-            // Jaguar1 ENSWBCN software-beacon path. Uses the configured APFPV SSID+"-AP"/password/channel.
-            // Full HW beacon + client ACK needs the DEVOURER_AP_HWACK gate on (native env).
-            m.add(apModeOn ? "Dongle AP (test): ON — tap to stop" : "Dongle AP (test): start")
-                .setOnMenuItemClickListener(i -> {
-                    if (apfpvLinkManager == null) return true;
-                    if (apModeOn) {
-                        apfpvLinkManager.stopDongleAp(); apModeOn = false;
-                    } else {
-                        String apSsid = getSharedPreferences("pixelpilot", MODE_PRIVATE)
-                                .getString("apfpv_ssid", "OpenIPC") + "-AP";
-                        String apPass = getSharedPreferences("pixelpilot", MODE_PRIVATE)
-                                .getString("apfpv_pass", "12345678");
-                        int ch = getSharedPreferences("pixelpilot", MODE_PRIVATE).getInt("apfpv_channel", 40);
-                        apModeOn = apfpvLinkManager.startDongleAp(apSsid, ch, apPass);
-                        if (apModeOn) Toast.makeText(this, "Dongle AP \"" + apSsid + "\" ch" + ch
-                                + " — scan for it on a 2nd device to test association", Toast.LENGTH_LONG).show();
-                    }
-                    return true;
-                });
-            m.add("Reconnect").setOnMenuItemClickListener(i -> {
-                if (apfpvLinkManager != null) apfpvLinkManager.refreshAdapters(); return true; });
-        }
+        // WIP: bring the DONGLE up as a Wi-Fi AP (SoftAP) so a second device can associate — the
+        // Jaguar1 ENSWBCN software-beacon path. Uses the configured APFPV SSID+"-AP"/password/channel.
+        // Full HW beacon + client ACK needs the DEVOURER_AP_HWACK gate on (native env).
+        m.add(apModeOn ? "Dongle AP (test): ON — tap to stop" : "Dongle AP (test): start")
+            .setOnMenuItemClickListener(i -> {
+                if (apfpvLinkManager == null) return true;
+                if (apModeOn) {
+                    apfpvLinkManager.stopDongleAp(); apModeOn = false;
+                } else {
+                    String apSsid = getSharedPreferences("pixelpilot", MODE_PRIVATE)
+                            .getString("apfpv_ssid", "OpenIPC") + "-AP";
+                    String apPass = getSharedPreferences("pixelpilot", MODE_PRIVATE)
+                            .getString("apfpv_pass", "12345678");
+                    int ch = getSharedPreferences("pixelpilot", MODE_PRIVATE).getInt("apfpv_channel", 40);
+                    apModeOn = apfpvLinkManager.startDongleAp(apSsid, ch, apPass);
+                    if (apModeOn) Toast.makeText(this, "Dongle AP \"" + apSsid + "\" ch" + ch
+                            + " — scan for it on a 2nd device to test association", Toast.LENGTH_LONG).show();
+                }
+                return true;
+            });
+        m.add("Reconnect").setOnMenuItemClickListener(i -> {
+            if (apfpvLinkManager != null) apfpvLinkManager.refreshAdapters(); return true; });
         // Auto A-MPDU: the app pushes rtw_ampdu_enable to the VTX to match the active client —
         // dongle→OFF (can't emit compressed BlockAck; A-MPDU-on collapses it to ~2 Mbps),
         // phone-Wi-Fi→ON (can BlockAck; aggregation → ~30 Mbps). Toggle to leave the VTX as-is.
@@ -1394,9 +1421,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
                 : (apfpvLinkManager != null ? apfpvLinkManager.statusLine() : "—");
         m.add("Status: " + apfpvStatus).setEnabled(false);
         m.add("RSSI: " + (apfpvLink != null ? apfpvLink.getRssi() : -99) + " dBm").setEnabled(false);
-        // Adapter picker: only meaningful with a dongle to pick among (WlxAdapters enumerates
-        // USB Wi-Fi adapters); phone-Wi-Fi mode has none.
-        if (linkMode == LinkModeCoordinator.Mode.APFPV && apfpvLinkManager != null) {
+        if (apfpvLinkManager != null) {
             com.openipc.pixelpilot.apfpv.WlxAdapters wlx = apfpvLinkManager.adapters();
             if (wlx.count() > 1)
                 for (com.openipc.pixelpilot.apfpv.WlxAdapters.Adapter a : wlx.all())
@@ -1413,38 +1438,34 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         // PRIMARY (lowest 20 MHz channel) + the width; legalApfpvChannel(primary,bw) then
         // reproduces the AP's exact secondary-offset/center. Labels match the WebUI 1:1 so
         // you pick the SAME string on both ends. Legal DE 5.2 GHz UNII-1 (5170-5250) only.
-        // Dongle-station only: it drives apfpvLinkManager.setChannel/setBandwidth directly.
-        // Phone-Wi-Fi follows the AP's channel/CSA via Android's own Wi-Fi stack — no arming.
-        if (linkMode == LinkModeCoordinator.Mode.APFPV) {
-            SubMenu chMenu = popup.getMenu().addSubMenu("APFPV Channel/Width");
-            int curCh = getSharedPreferences("pixelpilot", MODE_PRIVATE).getInt("apfpv_channel", 40);
-            int curBw = getSharedPreferences("pixelpilot", MODE_PRIVATE).getInt("apfpv_bandwidth", 20);
-            chMenu.add("Current: ch" + curCh + " · " + curBw + " MHz").setEnabled(false);
-            final int[][] apfpvRanges = {
-                {36, 20}, {40, 20}, {44, 20}, {48, 20},   // 20 MHz singles
-                {36, 40}, {44, 40},                        // 40 MHz pairs: 36_40, 44_48 (primary = lower)
-                {36, 80},                                  // 80 MHz quad: 36_48 (primary 36)
-            };
-            final String[] apfpvRangeLabels = {
-                "36 (20 MHz)", "40 (20 MHz)", "44 (20 MHz)", "48 (20 MHz)",
-                "36_40 (40 MHz)", "44_48 (40 MHz)", "36_48 (80 MHz)",
-            };
-            for (int r = 0; r < apfpvRanges.length; r++) {
-                final int primary = apfpvRanges[r][0], bw = apfpvRanges[r][1];
-                chMenu.add(apfpvRangeLabels[r]).setOnMenuItemClickListener(i -> {
-                    getSharedPreferences("pixelpilot", MODE_PRIVATE).edit()
-                        .putInt("apfpv_channel", primary).putInt("apfpv_bandwidth", bw).apply();
-                    if (apfpvLinkManager != null) {
-                        apfpvLinkManager.setChannel(primary);
-                        apfpvLinkManager.setBandwidth(bw);
-                        apfpvLinkManager.refreshAdapters();   // reconnect to apply
-                    }
-                    Toast.makeText(this, String.format(java.util.Locale.US,
-                        "APFPV → primary ch%d · %d MHz. Set the SAME range on the air WebUI. Reconnecting…",
-                        primary, bw), Toast.LENGTH_LONG).show();
-                    return true;
-                });
-            }
+        SubMenu chMenu = popup.getMenu().addSubMenu("APFPV Channel/Width");
+        int curCh = getSharedPreferences("pixelpilot", MODE_PRIVATE).getInt("apfpv_channel", 40);
+        int curBw = getSharedPreferences("pixelpilot", MODE_PRIVATE).getInt("apfpv_bandwidth", 20);
+        chMenu.add("Current: ch" + curCh + " · " + curBw + " MHz").setEnabled(false);
+        final int[][] apfpvRanges = {
+            {36, 20}, {40, 20}, {44, 20}, {48, 20},   // 20 MHz singles
+            {36, 40}, {44, 40},                        // 40 MHz pairs: 36_40, 44_48 (primary = lower)
+            {36, 80},                                  // 80 MHz quad: 36_48 (primary 36)
+        };
+        final String[] apfpvRangeLabels = {
+            "36 (20 MHz)", "40 (20 MHz)", "44 (20 MHz)", "48 (20 MHz)",
+            "36_40 (40 MHz)", "44_48 (40 MHz)", "36_48 (80 MHz)",
+        };
+        for (int r = 0; r < apfpvRanges.length; r++) {
+            final int primary = apfpvRanges[r][0], bw = apfpvRanges[r][1];
+            chMenu.add(apfpvRangeLabels[r]).setOnMenuItemClickListener(i -> {
+                getSharedPreferences("pixelpilot", MODE_PRIVATE).edit()
+                    .putInt("apfpv_channel", primary).putInt("apfpv_bandwidth", bw).apply();
+                if (apfpvLinkManager != null) {
+                    apfpvLinkManager.setChannel(primary);
+                    apfpvLinkManager.setBandwidth(bw);
+                    apfpvLinkManager.refreshAdapters();   // reconnect to apply
+                }
+                Toast.makeText(this, String.format(java.util.Locale.US,
+                    "APFPV → primary ch%d · %d MHz. Set the SAME range on the air WebUI. Reconnecting…",
+                    primary, bw), Toast.LENGTH_LONG).show();
+                return true;
+            });
         }
 
         // aalink keys — each its OWN top-level submenu, exactly like Channel/Bandwidth
@@ -1832,8 +1853,11 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
             item.setChecked(en); setDvrAuto(en);
             // Auto DVR is ARM-driven: record exactly the armed window. The stream-presence watcher
             // still runs, but only as a fallback for setups with no arm telemetry (see below).
-            if (en) { startAutoDvrWatcher(); startArmWatcher(); }
-            else    { stopAutoDvrWatcher();  stopArmWatcher();  }
+            // The MSP arm watcher also feeds the ground OSD + voice alerts, so it must keep running
+            // regardless of Auto DVR — toggling Auto DVR off only stops the RECORDING, not the OSD.
+            // (The arm callback and the stream watcher both already gate recording on getDvrAuto().)
+            if (en) startAutoDvrWatcher(); else stopAutoDvrWatcher();
+            startArmWatcher();
             item.setShowAsAction(MenuItem.SHOW_AS_ACTION_COLLAPSE_ACTION_VIEW);
             item.setActionView(new View(this));
             return false;
@@ -2387,9 +2411,9 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
 
     // Record mode: 0=Raw, 1=OSD, 2=Raw+OSD. (Raw+OSD records two files; raw stream is the dual-
     // encoder follow-up — see apfpv-dvr-recordmode-autodvr memory.)
-    public int getDvrRecordMode() { return getSharedPreferences("general", Context.MODE_PRIVATE).getInt("dvr_record_mode", 1); }
+    public int getDvrRecordMode() { return getSharedPreferences("general", Context.MODE_PRIVATE).getInt("dvr_record_mode", 2); }
     public void setDvrRecordMode(int m) { getSharedPreferences("general", Context.MODE_PRIVATE).edit().putInt("dvr_record_mode", m).apply(); }
-    public boolean getDvrAuto() { return getSharedPreferences("general", Context.MODE_PRIVATE).getBoolean("dvr_auto", false); }
+    public boolean getDvrAuto() { return getSharedPreferences("general", Context.MODE_PRIVATE).getBoolean("dvr_auto", true); }
     public void setDvrAuto(boolean e) { getSharedPreferences("general", Context.MODE_PRIVATE).edit().putBoolean("dvr_auto", e).apply(); }
 
     // Auto DVR is ARM-DRIVEN: with it enabled, arming the FC starts recording and disarming stops
@@ -2398,7 +2422,320 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
     // mandatory (without it the FC only pushes pre-rendered OSD text, with no arm bit on the wire).
     // If no arm telemetry ever arrives (msposd not configured that way), the stream-presence
     // watcher below transparently takes over so Auto DVR still does something useful.
+    // aalink's status line, drawn top-centre where the VTX overlay used to put it. Added in code
+    // rather than the layout so it needs no XML change and sits above the SurfaceView.
+    private AalinkStats aalinkStats;
+    private android.widget.TextView aalinkView, aalinkViewR;
+    private android.os.Handler aalinkUi;
+    private Runnable aalinkTick;
+
+    private void startAalinkStats() {
+        if (aalinkStats != null) return;
+        // DEFAULT ON. This was briefly defaulted off while diagnosing dongle unresponsiveness, but
+        // testing cleared it: the symptom persisted with both this and the OSD disabled, and the
+        // real cause turned out to be the supervisor's diagnostic USB control-reads blocking the
+        // loop that sends the ARP keepalive. Kept switchable for future isolation:
+        //   adb shell settings put global pixelpilot_aalink_stats 0
+        // Note the fetch still needs the TUN uplink; while that is down it simply backs off to a
+        // 60 s retry and reports "--" rather than costing anything.
+        try {
+            if (android.provider.Settings.Global.getInt(getContentResolver(), "pixelpilot_aalink_stats", 1) == 0) {
+                android.util.Log.i("AalinkStats", "disabled (pixelpilot_aalink_stats=0); TUN uplink required");
+                return;
+            }
+        } catch (Throwable ignored) { return; }
+        buildAalinkViews();
+        aalinkStats = new AalinkStats(AalinkStats.DEFAULT_HOST);
+        aalinkStats.start();
+        aalinkUi = new android.os.Handler(android.os.Looper.getMainLooper());
+        aalinkTick = new Runnable() {
+            @Override public void run() {
+                if (aalinkStats != null) {
+                    String txt = aalinkStats.line();
+                    if (aalinkView != null) aalinkView.setText(txt);
+                    if (aalinkViewR != null) aalinkViewR.setText(txt);
+                }
+                tickGroundOsd();
+                if (aalinkUi != null) aalinkUi.postDelayed(this, 200);   // OSD needs ~5 Hz, not 1 Hz
+            }
+        };
+        aalinkUi.post(aalinkTick);
+    }
+
+    /** In VR the screen is split per eye, so a single centred line would land in the gap between
+     *  them. Draw one line per half instead, each centred within its own half; non-VR keeps one
+     *  centred line. Views are added with addContentView so this works whatever the layout root is
+     *  (an earlier version required a FrameLayout root and silently did nothing otherwise). */
+    private void buildAalinkViews() {
+        removeAalinkViews();
+        boolean vr = isVRMode;
+        aalinkView = makeAalinkLabel();
+        if (!vr) {
+            android.widget.FrameLayout.LayoutParams lp = new android.widget.FrameLayout.LayoutParams(
+                    android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
+                    android.widget.FrameLayout.LayoutParams.WRAP_CONTENT);
+            lp.gravity = android.view.Gravity.TOP | android.view.Gravity.CENTER_HORIZONTAL;
+            lp.topMargin = 8;
+            addContentView(aalinkView, lp);
+            aalinkView.bringToFront();
+        } else {
+            // VR: one line per eye, pinned to the TOP of that eye's VIDEO rect (not the screen half)
+            // so it tracks the video as the goggles' IPD/size seekbars move and resize it. The real
+            // bounds are set from the live SurfaceView geometry in syncVrOverlays(); add with a
+            // placeholder here, then let the layout pass position it.
+            addContentView(aalinkView, new android.widget.FrameLayout.LayoutParams(
+                    android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
+                    android.widget.FrameLayout.LayoutParams.WRAP_CONTENT));
+            aalinkViewR = makeAalinkLabel();
+            addContentView(aalinkViewR, new android.widget.FrameLayout.LayoutParams(
+                    android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
+                    android.widget.FrameLayout.LayoutParams.WRAP_CONTENT));
+            ensureVrSyncListeners();
+            binding.frameLayout.post(this::syncVrOverlays);
+        }
+    }
+
+    private android.widget.TextView makeAalinkLabel() {
+        android.widget.TextView t = new android.widget.TextView(this);
+        t.setTextColor(0xFF00FF66);
+        t.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 12);
+        t.setBackgroundColor(0x80000000);
+        t.setPadding(12, 4, 12, 4);
+        t.setGravity(android.view.Gravity.CENTER_HORIZONTAL);   // centre within its half in VR
+        // Force above the video SurfaceView; otherwise the overlay can be composited behind it and
+        // simply never appear.
+        t.setElevation(100f);
+        t.setTranslationZ(100f);
+        return t;
+    }
+
+    private void removeAalinkViews() {
+        for (android.widget.TextView v : new android.widget.TextView[]{ aalinkView, aalinkViewR }) {
+            if (v != null && v.getParent() instanceof android.view.ViewGroup)
+                ((android.view.ViewGroup) v.getParent()).removeView(v);
+        }
+        aalinkView = null; aalinkViewR = null;
+    }
+
+    /** Re-lay the line when VR mode is toggled, so it moves to/from the per-eye positions. */
+    public void refreshAalinkLayout() { if (aalinkStats != null) buildAalinkViews(); if (osdCanvas != null) buildOsdViews(); }
+
+    private void stopAalinkStats() {
+        removeAalinkViews();
+        if (aalinkUi != null && aalinkTick != null) aalinkUi.removeCallbacks(aalinkTick);
+        aalinkUi = null; aalinkTick = null;
+        if (aalinkStats != null) { aalinkStats.stop(); aalinkStats = null; }
+    }
+
+    // Ground-side Betaflight OSD, drawn from MSP_DISPLAYPORT. Rendered into an ImageView in the
+    // content layer rather than GL: that keeps VR handling identical to the aalink line (one view
+    // per eye-half) AND means captureOsdBitmap() picks it up for OSD/Raw+OSD recording for free,
+    // with no changes to the GL or DVR plumbing.
+    private MspOsdCanvas osdCanvas;
+    private android.widget.ImageView osdView, osdViewR;
+    private android.graphics.Bitmap osdBitmap, osdBitmapBack;   // double-buffered
+    private int osdLastGen = -1;
+    private android.os.HandlerThread osdThread;
+    private android.os.Handler osdHandler;
+    private volatile boolean osdRenderInFlight = false;
+
+    private void startGroundOsd() {
+        if (osdCanvas != null) return;
+        // Runtime kill-switch, settable without a rebuild or UI:
+        //   adb shell settings put global pixelpilot_ground_osd 0   (off)
+        // Exists because rasterising the OSD is real per-frame work and the dongle path's RX worker
+        // is known to be CPU-sensitive, so it must be possible to take this out of the picture when
+        // diagnosing video/responsiveness problems.
+        try {
+            if (android.provider.Settings.Global.getInt(getContentResolver(), "pixelpilot_ground_osd", 1) == 0) {
+                android.util.Log.i("MspOsd", "ground OSD disabled by pixelpilot_ground_osd=0");
+                return;
+            }
+        } catch (Throwable ignored) { }
+        osdCanvas = new MspOsdCanvas();
+        if (!osdCanvas.loadAtlas(this, "fonts/" + getOsdFont(this) + ".png")) { osdCanvas = null; return; }
+        if (mspArmListener != null) mspArmListener.osdCanvas = osdCanvas;
+        buildOsdViews();
+    }
+
+    private void buildOsdViews() {
+        removeOsdViews();
+        if (osdCanvas == null) return;
+        android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
+        boolean vr = isVRMode;
+        // Bitmap size/aspect. In VR the OSD sits ON each eye's video rect, so raster it at the
+        // VIDEO aspect — MspOsdCanvas uses cellW=W/cols, cellH=H/rows, so a half-width x full-height
+        // bitmap makes the cells tall-and-narrow and the glyphs stretch vertically. At the video
+        // aspect the cells stay proportional, and FIT_XY into the (video-aspect) SurfaceView rect
+        // adds no distortion. Non-VR keeps the full-screen bitmap (unchanged).
+        int w, h;
+        if (vr) {
+            w = lastVideoW > 0 ? lastVideoW : 1280;
+            h = lastVideoH > 0 ? lastVideoH : 720;
+        } else {
+            w = dm.widthPixels; h = dm.heightPixels;
+        }
+        if (w <= 0 || h <= 0) return;
+        // One shared bitmap: both eyes show the same overlay, so render once and display twice.
+        osdBitmap = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888);
+        osdBitmapBack = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888);
+        if (osdThread == null) {
+            osdThread = new android.os.HandlerThread("OsdRender");
+            osdThread.start();
+            osdHandler = new android.os.Handler(osdThread.getLooper());
+        }
+        osdView = makeOsdImageView();
+        osdView.setImageBitmap(osdBitmap);
+        if (!vr) {
+            android.widget.FrameLayout.LayoutParams lp = new android.widget.FrameLayout.LayoutParams(w, h);
+            lp.gravity = android.view.Gravity.CENTER;
+            addContentView(osdView, lp);
+        } else {
+            // Per-eye: pinned exactly onto each eye's video SurfaceView by syncVrOverlays().
+            addContentView(osdView, new android.widget.FrameLayout.LayoutParams(w, h));
+            osdViewR = makeOsdImageView();
+            osdViewR.setImageBitmap(osdBitmap);
+            addContentView(osdViewR, new android.widget.FrameLayout.LayoutParams(w, h));
+            ensureVrSyncListeners();
+            binding.frameLayout.post(this::syncVrOverlays);
+        }
+        osdLastGen = -1;
+    }
+
+    private android.widget.ImageView makeOsdImageView() {
+        android.widget.ImageView iv = new android.widget.ImageView(this);
+        // Must not intercept input: it covers the video, above the controls.
+        iv.setClickable(false); iv.setFocusable(false);
+        iv.setElevation(99f); iv.setTranslationZ(99f);   // above video, below the text line
+        iv.setScaleType(android.widget.ImageView.ScaleType.FIT_XY);
+        return iv;
+    }
+
+    // --- VR overlay tracking: keep the OSD + aalink glued to each eye's video SurfaceView --------
+    private boolean vrSyncListenersAdded = false;
+
+    /** Re-run syncVrOverlays() whenever a video SurfaceView is (re)laid out — i.e. on the IPD/size
+     *  seekbars, on a video-resolution/aspect change, or on rotation. */
+    private void ensureVrSyncListeners() {
+        if (vrSyncListenersAdded) return;
+        android.view.View.OnLayoutChangeListener l =
+                (v, l0, t0, r0, b0, ol, ot, or, ob) -> binding.frameLayout.post(this::syncVrOverlays);
+        binding.surfaceViewLeft.addOnLayoutChangeListener(l);
+        binding.surfaceViewRight.addOnLayoutChangeListener(l);
+        vrSyncListenersAdded = true;
+    }
+
+    /** Pin the per-eye OSD + aalink overlays exactly onto each eye's video SurfaceView, so they
+     *  follow the goggles' IPD/size seekbars and share the video's aspect (no vertical stretch). */
+    private void syncVrOverlays() {
+        if (!isVRMode) return;
+        android.view.View content = findViewById(android.R.id.content);
+        if (content == null) return;
+        int[] cl = new int[2]; content.getLocationInWindow(cl);
+        positionOverEye(osdView,     binding.surfaceViewLeft,  cl, false);
+        positionOverEye(osdViewR,    binding.surfaceViewRight, cl, false);
+        positionOverEye(aalinkView,  binding.surfaceViewLeft,  cl, true);
+        positionOverEye(aalinkViewR, binding.surfaceViewRight, cl, true);
+    }
+
+    /** Size/place one overlay to overlap a video SurfaceView. topLine=true pins a WRAP_CONTENT text
+     *  line to the top-centre of the video; otherwise the overlay fills the whole video rect. */
+    private void positionOverEye(android.view.View overlay, android.view.View surface, int[] contentLoc, boolean topLine) {
+        if (overlay == null || surface == null) return;
+        int sw = surface.getWidth(), sh = surface.getHeight();
+        if (sw <= 0 || sh <= 0) return;   // not measured yet; the layout listener will retry
+        int[] sl = new int[2]; surface.getLocationInWindow(sl);
+        int x = sl[0] - contentLoc[0], y = sl[1] - contentLoc[1];
+        android.widget.FrameLayout.LayoutParams lp = topLine
+                ? new android.widget.FrameLayout.LayoutParams(sw, android.widget.FrameLayout.LayoutParams.WRAP_CONTENT)
+                : new android.widget.FrameLayout.LayoutParams(sw, sh);
+        lp.gravity = android.view.Gravity.TOP | android.view.Gravity.START;
+        lp.leftMargin = x;
+        lp.topMargin = topLine ? y + 8 : y;
+        overlay.setLayoutParams(lp);
+    }
+
+    private void removeOsdViews() {
+        for (android.widget.ImageView v : new android.widget.ImageView[]{ osdView, osdViewR })
+            if (v != null && v.getParent() instanceof android.view.ViewGroup)
+                ((android.view.ViewGroup) v.getParent()).removeView(v);
+        osdView = null; osdViewR = null;
+    }
+
+    private void stopGroundOsd() {
+        removeOsdViews();
+        if (mspArmListener != null) mspArmListener.osdCanvas = null;
+        if (osdThread != null) { osdThread.quitSafely(); osdThread = null; osdHandler = null; }
+        osdRenderInFlight = false;
+        osdCanvas = null; osdBitmap = null; osdBitmapBack = null;
+    }
+
+    /** Re-rasterise only when the canvas actually changed (~10 Hz), not per UI tick. */
+    private void tickGroundOsd() {
+        if (osdCanvas == null || osdBitmapBack == null || !osdCanvas.ready()) return;
+        if (osdHandler == null || osdRenderInFlight) return;
+        int g = osdCanvas.generation();
+        if (g == osdLastGen) return;
+        osdLastGen = g;
+        // Rasterise OFF the UI thread. Doing it inline caused an ANR: a full-screen erase plus ~68
+        // scaled drawBitmap calls at 5 Hz on the main thread, while also contending with the MSP
+        // socket thread for the canvas lock.
+        osdRenderInFlight = true;
+        osdHandler.post(() -> {
+            try {
+                osdCanvas.render(osdBitmapBack);
+            } catch (Throwable t) {
+                android.util.Log.w("MspOsd", "render failed: " + t);
+            }
+            runOnUiThread(() -> {
+                // Swap buffers so the renderer never draws into the bitmap the views are showing.
+                android.graphics.Bitmap shown = osdBitmap;
+                osdBitmap = osdBitmapBack;
+                osdBitmapBack = shown;
+                if (osdView != null) osdView.setImageBitmap(osdBitmap);
+                if (osdViewR != null) osdViewR.setImageBitmap(osdBitmap);
+                osdRenderInFlight = false;
+            });
+        });
+    }
+
     private MspArmListener mspArmListener;
+    // Voice alerts (OpenTX-style condition table fed by MSP arm + OSD-scraped values).
+    private SoundPlayer soundPlayer;
+    private SoundEvents soundEvents;
+    private android.os.Handler soundHandler;
+    private Runnable soundTick;
+    public static boolean getSoundEnabled(Context c) {
+        return c.getSharedPreferences("general", MODE_PRIVATE).getBoolean("sound-alerts", true);
+    }
+    private void startSoundAlerts() {
+        if (soundPlayer != null) return;
+        soundPlayer = new SoundPlayer(this, "sounds");
+        soundPlayer.start();
+        soundPlayer.setEnabled(getSoundEnabled(this));
+        soundEvents = new SoundEvents();
+        soundEvents.setPlayer(soundPlayer);
+        soundEvents.load(this, "apfpv_sounds.conf");
+        soundHandler = new android.os.Handler(getMainLooper());
+        soundTick = new Runnable() {
+            @Override public void run() {
+                if (soundEvents != null && mspArmListener != null) {
+                    synchronized (mspArmListener.soundVars) {
+                        soundEvents.evaluate(mspArmListener.soundVars,
+                                android.os.SystemClock.elapsedRealtime());
+                    }
+                }
+                if (soundHandler != null) soundHandler.postDelayed(this, 500);
+            }
+        };
+        soundHandler.postDelayed(soundTick, 500);
+    }
+    private void stopSoundAlerts() {
+        if (soundHandler != null && soundTick != null) soundHandler.removeCallbacks(soundTick);
+        soundHandler = null;
+        if (soundPlayer != null) { soundPlayer.shutdown(); soundPlayer = null; }
+        soundEvents = null;
+    }
     private void startArmWatcher() {
         if (mspArmListener != null) return;
         mspArmListener = new MspArmListener(MspArmListener.DEFAULT_PORT, armed -> runOnUiThread(() -> {
@@ -2413,8 +2750,10 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
             }
         }));
         mspArmListener.start();
+        startSoundAlerts();
     }
     private void stopArmWatcher() {
+        stopSoundAlerts();
         if (mspArmListener != null) { mspArmListener.stop(); mspArmListener = null; }
     }
     /** True once real FC arm telemetry has been seen — then arm owns the start/stop decision. */
@@ -2443,7 +2782,11 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
                         // the whole powered-on session instead of just the armed window. With no arm
                         // telemetry this is the fallback that keeps Auto DVR useful. The
                         // stream-drop auto-stop below runs as a safety net either way.
-                        if (dvrFd == null && !userStoppedDvr && !haveArmTelemetry()) { Uri u = openDvrFile(); if (u != null) startDvr(u); }
+                        // Auto DVR follows ARM only. Starting on mere stream presence meant that
+                        // whenever arm telemetry was absent (msposd not forwarding, link down, VPN
+                        // bridge off) recording began as soon as video appeared, which is not what
+                        // "auto record on arm" should do. The stream-drop auto-stop below is kept
+                        // as a safety net so a recording can never be left running forever.
                     } else if (++autoNoStream >= 3) {
                         if (dvrFd != null) stopDvr();   // stream gone -> auto-stop
                         userStoppedDvr = false;          // a returning stream may auto-start again
@@ -2475,20 +2818,37 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         int[] rootLoc = new int[2]; root.getLocationInWindow(rootLoc);
         if (osdManager != null && osdManager.listOSDItems != null) {
             for (com.openipc.pixelpilot.osd.OSDElement el : osdManager.listOSDItems) {
-                android.view.View v = el.layout;
-                if (v == null || v.getVisibility() != View.VISIBLE || v.getWidth() <= 0 || v.getHeight() <= 0) continue;
-                int[] loc = new int[2]; v.getLocationInWindow(loc);
-                float cx = (loc[0] - rootLoc[0]) + v.getWidth() / 2f;
-                float cy = (loc[1] - rootLoc[1]) + v.getHeight() / 2f;
-                float ncx = cx * sx, ncy = cy * sy;         // element center, % preserved
-                int save = c.save();
-                c.translate(ncx - v.getWidth() * ss / 2f, ncy - v.getHeight() * ss / 2f);
-                c.scale(ss, ss);
-                v.draw(c);
-                c.restoreToCount(save);
+                drawViewScaled(c, el.layout, rootLoc, sx, sy, ss);
             }
         }
+        // The MSP OSD (Betaflight DisplayPort) and the aalink stats line are separate addContentView
+        // overlays, not osdManager items, so they must be drawn explicitly or the recording shows the
+        // legacy OSD only.
+        if (isVRMode && osdBitmap != null) {
+            // VR: osdBitmap is already the full OSD at the video aspect — blit it straight into the
+            // (video-aspect) DVR frame instead of the per-eye, video-rect-sized osdView.
+            c.drawBitmap(osdBitmap, null, new android.graphics.Rect(0, 0, vw, vh), null);
+        } else {
+            drawViewScaled(c, osdView, rootLoc, sx, sy, ss);
+        }
+        drawViewScaled(c, aalinkView, rootLoc, sx, sy, ss);
         return bmp;
+    }
+
+    /** Draw one overlay View into the OSD-capture canvas, preserving its %-from-edge position and
+     *  true (unstretched) size — the shared placement math for every captured layer. */
+    private void drawViewScaled(android.graphics.Canvas c, android.view.View v, int[] rootLoc,
+                                float sx, float sy, float ss) {
+        if (v == null || v.getVisibility() != View.VISIBLE || v.getWidth() <= 0 || v.getHeight() <= 0) return;
+        int[] loc = new int[2]; v.getLocationInWindow(loc);
+        float cx = (loc[0] - rootLoc[0]) + v.getWidth() / 2f;
+        float cy = (loc[1] - rootLoc[1]) + v.getHeight() / 2f;
+        float ncx = cx * sx, ncy = cy * sy;         // element center, % preserved
+        int save = c.save();
+        c.translate(ncx - v.getWidth() * ss / 2f, ncy - v.getHeight() * ss / 2f);
+        c.scale(ss, ss);
+        v.draw(c);
+        c.restoreToCount(save);
     }
 
     private Timer osdUpdateTimer;
@@ -2566,12 +2926,24 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         Intent intent = new Intent(this, WfbNgVpnService.class);
         intent.setAction("STOP_SERVICE");
         startService(intent);
+
+        // Also stop the APFPV (dongle) TUN. It was leaking: only WfbNgVpnService was stopped here,
+        // so on APFPV/dongle mode ApfpvVpnService kept running after the activity closed. Because a
+        // Service keeps its PROCESS alive, a normal close (back/home/swipe) left a half-dead process
+        // — dongle already disconnected by stopAdapters() above, but the VPN still "up" — and the
+        // next launch reused that stale process and fought it for the dongle (restart churn, no
+        // MSP/aalink data, overlays blank). Only an explicit force-stop cleaned it, which is why it
+        // worked when launched via adb but not when the user tapped the icon. Stopping it here lets
+        // the process die cleanly so every relaunch is a fresh start.
+        startService(new Intent(this, ApfpvVpnService.class).setAction("STOP"));
     }
 
     @Override
     protected void onStop() {
         if (MAVLINK_ENABLED) MavlinkNative.nativeStop(this);
         stopArmWatcher();   // release the MSP UDP socket while backgrounded
+        stopAalinkStats();
+        stopGroundOsd();
         handler.removeCallbacks(runnable);
         unregisterReceivers();
         // All transports + video already stopped in onPause; don't double-disconnect
@@ -2596,7 +2968,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
                 String pass = getSharedPreferences("pixelpilot", MODE_PRIVATE).getString("apfpv_pass", "12345678");
                 // APFPV (dongle) RF is independent of WFB: use the APFPV channel +
                 // bandwidth prefs (default legal DE 5.2 GHz UNII-1 ch40, 20 MHz).
-                int apfpvCh = getSharedPreferences("pixelpilot", MODE_PRIVATE).getInt("apfpv_channel", 40);
+                int apfpvCh = getSharedPreferences("pixelpilot", MODE_PRIVATE).getInt("apfpv_channel", 36);
                 int apfpvBw = getSharedPreferences("pixelpilot", MODE_PRIVATE).getInt("apfpv_bandwidth", 20);
                 apfpvLinkManager.setChannel(apfpvCh);
                 apfpvLinkManager.setBandwidth(apfpvBw);
@@ -2626,7 +2998,14 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         videoPlayer.startAudio();
         // Flush stale frames at the menu-configured threshold (default 60ms).
         videoPlayer.setVideoFlushMs(getVideoFlushMs(this));
-        if (getDvrAuto()) { startAutoDvrWatcher(); startArmWatcher(); }
+        // Always run the MSP arm watcher — it feeds the ground OSD and the voice alerts, which must
+        // show whether or not Auto DVR is on. Only the auto-record stream watcher is gated on Auto
+        // DVR; recording itself is additionally gated inside both watchers via getDvrAuto().
+        startArmWatcher();
+        if (getDvrAuto()) startAutoDvrWatcher();
+        startAalinkStats();
+        startGroundOsd();
+        if (aalinkStats == null && osdCanvas == null) stopAalinkStats();   // nothing to tick
 
         osdManager.restoreOSDConfig();
 
@@ -2709,6 +3088,9 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         updateViewRatio(R.id.mainVideo, lastVideoW, lastVideoH);
         updateViewRatio(R.id.surfaceViewLeft, lastVideoW, lastVideoH);
         updateViewRatio(R.id.surfaceViewRight, lastVideoW, lastVideoH);
+        // The VR OSD is rastered at the video aspect, so rebuild it once the resolution/aspect is
+        // known or changes; buildOsdViews() re-pins the overlays onto the freshly-ratioed surfaces.
+        if (isVRMode) runOnUiThread(() -> { if (osdCanvas != null) buildOsdViews(); });
     }
 
     private void updateViewRatio(int viewId, int videoW, int videoH) {
@@ -2727,6 +3109,96 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         }
     }
 
+    // --- Display frame-rate matching (LATENCY-FREE smoothness) -----------------------------
+    // Judder on a 120 Hz panel with a ~90 fps stream is a cadence mismatch: each frame is held
+    // for 1.33 vsyncs (4:3 pulldown). Matching the panel refresh to the actual stream fps makes
+    // frames map to a WHOLE number of vsyncs — smooth — and adds ZERO latency: it changes only
+    // the panel cadence, not the presentation pipeline (vsync stays off in GLFanoutRenderer, so
+    // frames still present as soon as they arrive; we just line the panel rate up with them).
+    private int lastAppliedFps = 0;
+    private int candidateFps = 0, candidateCount = 0;   // debounce for the display-mode switch
+
+    private static int snapFps(float f) {
+        final int[] common = { 24, 25, 30, 48, 50, 60, 90, 100, 120, 144 };
+        int r = Math.round(f);
+        for (int c : common) if (Math.abs(r - c) <= 6) return c;   // snap jittery measured fps to the nominal rate
+        return r;
+    }
+
+    /** Re-select the display mode whose refresh best matches the stream fps (frames map to whole
+     *  vsyncs → no pulldown judder) and hint the platform the exact content rate. Called from
+     *  onDecodingInfoChanged once the live decode fps is known; a no-op until the fps changes. */
+    private void matchDisplayToStreamFps(float measuredFps) {
+        final int fps = snapFps(measuredFps);
+        if (fps <= 0) return;
+        // Anti-thrash debounce. The measured decode fps DIPS on packet loss (e.g. 90 -> 30/60/70),
+        // and every display-mode switch is a visible panel flicker. So only act on an fps that has
+        // been STABLE across several readings (~a few seconds at onDecodingInfoChanged's ~1 Hz).
+        // Transient loss-induced dips never reach the threshold, so the panel stays locked at the
+        // real content rate instead of bouncing between 60/90/120 Hz.
+        if (fps == candidateFps) candidateCount++; else { candidateFps = fps; candidateCount = 1; }
+        if (fps == lastAppliedFps) return;
+        if (candidateCount < 4) return;   // require ~4 consecutive stable readings before switching
+        try {
+            android.view.Display disp = getWindowManager().getDefaultDisplay();
+            android.view.Display.Mode cur = disp.getMode();
+            android.view.Display.Mode best = null; double bestScore = Double.MAX_VALUE;
+            for (android.view.Display.Mode m : disp.getSupportedModes()) {
+                if (m.getPhysicalWidth() != cur.getPhysicalWidth()
+                        || m.getPhysicalHeight() != cur.getPhysicalHeight()) continue;
+                double r = m.getRefreshRate();
+                double mult = r / fps;
+                double frac = Math.abs(mult - Math.round(mult));   // distance to a whole multiple of fps
+                // Lower score = smoother. A refresh below the content rate can't show every frame,
+                // so it's penalised hardest; otherwise prefer a whole multiple, then the smallest
+                // one (so an exact match r==fps wins over 2x, for min power + latency).
+                //
+                // The whole-multiple rule matters MORE now that the renderer paces to vsync
+                // (GLFanoutRenderer swapInterval 1), not less. Measured on device with a 90 fps
+                // stream: pinning the 120 Hz panel to its native rate made the platform give up on
+                // frame-matching (120/90 = 1.33 is not an integer) and fall back to renderFrameRate
+                // 60 -> only 60 of 90 frames presented. Choosing 90 Hz gives a clean 1:1.
+                double score = (r + 0.5 < fps) ? 1000.0 + (fps - r) : frac * 100.0 + mult;
+                if (best == null || score < bestScore) { best = m; bestScore = score; }
+            }
+            if (best != null) {
+                WindowManager.LayoutParams lp = getWindow().getAttributes();
+                if (lp.preferredDisplayModeId != best.getModeId()) {
+                    lp.preferredDisplayModeId = best.getModeId();
+                    getWindow().setAttributes(lp);
+                }
+                com.openipc.videonative.GLFanoutManager.setDisplayRefreshRateHz(best.getRefreshRate());
+                Log.i(TAG, "match display to " + fps + "fps -> " + best.getPhysicalWidth() + "x"
+                        + best.getPhysicalHeight() + "@" + best.getRefreshRate() + "Hz");
+            }
+            applySurfaceFrameRate(fps);
+            lastAppliedFps = fps;
+        } catch (Throwable t) { Log.w(TAG, "match display to fps failed: " + t); }
+    }
+
+    /** Tell the platform the exact content frame rate (API 30+) so it frame-matches precisely,
+     *  independent of the manual mode pick above. FIXED_SOURCE = a fixed-rate source (video). */
+    private void applySurfaceFrameRate(int fps) {
+        if (android.os.Build.VERSION.SDK_INT < 30) return;
+        android.view.SurfaceView[] svs = { binding.mainVideo, binding.surfaceViewLeft, binding.surfaceViewRight };
+        for (android.view.SurfaceView sv : svs) {
+            if (sv == null) continue;
+            android.view.Surface s = sv.getHolder().getSurface();
+            if (s == null || !s.isValid()) continue;
+            try {
+                if (android.os.Build.VERSION.SDK_INT >= 31)
+                    // ONLY_IF_SEAMLESS, not ALWAYS: this call is a *hint* of the content rate so the
+                    // platform can frame-match. With ALWAYS it is also permission to switch the panel
+                    // to the content rate, which dragged a 120 Hz panel down to 90 Hz and fought the
+                    // preferredDisplayModeId pin above. The mode choice belongs to matchDisplayToStreamFps.
+                    s.setFrameRate((float) fps, android.view.Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE,
+                                   android.view.Surface.CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS);
+                else
+                    s.setFrameRate((float) fps, android.view.Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE);
+            } catch (Throwable ignored) { /* surface not ready / unsupported — harmless */ }
+        }
+    }
+
     @Override
     public void onDecodingInfoChanged(final DecodingInfo decodingInfo) {
         mDecodingInfo = decodingInfo;
@@ -2735,6 +3207,8 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
             if (lastCodec != decodingInfo.nCodec) {
                 lastCodec = decodingInfo.nCodec;
             }
+            // Line the panel refresh up with the actual stream fps (latency-free anti-judder).
+            if (decodingInfo.currentFPS > 0) matchDisplayToStreamFps(decodingInfo.currentFPS);
             if (decodingInfo.currentFPS > 0) {
                 binding.tvMessage.setVisibility(View.GONE);
                 binding.wifiMessage.setVisibility(View.GONE);
@@ -2943,10 +3417,7 @@ public class VideoActivity extends AppCompatActivity implements IVideoParamsChan
         WebView view = new WebView(this);
         view.setWebViewClient(new WebViewClient());
         view.getSettings().setJavaScriptEnabled(true);
-        // wfb-ng addresses the VTX at its tunnel's fixed gateway (10.5.0.10); APFPV (dongle
-        // or phone-Wi-Fi) addresses it directly at 192.168.0.1, same host AirSshClient uses
-        // (useApfpvHost()).
-        view.loadUrl(apfpvMode ? "http://192.168.0.1" : "http://10.5.0.10");
+        view.loadUrl("10.5.0.10");
 
         Dialog dialog = new Dialog(this);
         dialog.setContentView(view);

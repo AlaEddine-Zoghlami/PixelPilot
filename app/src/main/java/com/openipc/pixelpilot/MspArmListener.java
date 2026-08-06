@@ -52,6 +52,13 @@ public final class MspArmListener {
     /** null until the first MSP_STATUS arrives, so we never fire an edge from an assumed state. */
     private Boolean lastArmed;
 
+    /** Optional: also decode MSP_DISPLAYPORT into this canvas for the ground-side OSD. */
+    public MspOsdCanvas osdCanvas;
+
+    /** OSD-scraped values + arm bit for the voice alerts (SoundEvents). Written on this MSP
+     *  thread; the render loop reads a snapshot. Null-safe: sound is optional. */
+    public final SoundEvents.Vars soundVars = new SoundEvents.Vars();
+
     public MspArmListener(int port, ArmCallback callback) {
         this.port = port;
         this.callback = callback;
@@ -133,6 +140,17 @@ public final class MspArmListener {
             int crc = payloadLen ^ cmd;
             for (int k = 0; k < payloadLen; k++) crc ^= (b[payloadStart + k] & 0xFF);
             if ((crc & 0xFF) == (b[payloadStart + payloadLen] & 0xFF)) {
+                // The same forwarded stream also carries MSP_DISPLAYPORT: one socket feeds both
+                // arm detection and the ground-side OSD.
+                if (cmd == 182) {
+                    if (osdCanvas != null) osdCanvas.feed(b, payloadStart, payloadLen);
+                    // DisplayPort WRITE_STRING (sub 3): row,col,attr, then glyphs -> scrape a value.
+                    if (payloadLen >= 4 && (b[payloadStart] & 0xFF) == 3) {
+                        synchronized (soundVars) {
+                            SoundEvents.feedOsdRun(soundVars, b, payloadStart + 4, payloadLen - 4);
+                        }
+                    }
+                }
                 if ((cmd == MSP_STATUS || cmd == MSP_STATUS_EX) && payloadLen >= 10) {
                     handleStatus(b, payloadStart);
                 }
@@ -158,6 +176,11 @@ public final class MspArmListener {
                 | ((long) (b[o + 2] & 0xFF) << 16)
                 | ((long) (b[o + 3] & 0xFF) << 24);
         boolean armed = (flags & 1L) != 0;
+        // Reflect the arm bit into soundVars so the voice-alert engine's `when=armed` /
+        // `when=!armed` rules can edge. Without this soundVars.armed stayed false forever and the
+        // arm/disarm announcements never fired, even though auto-DVR (which uses the callback
+        // below) worked. Written every status; the render loop reads a synchronized snapshot.
+        synchronized (soundVars) { soundVars.armed = armed; soundVars.haveArmed = true; }
         if (lastArmed == null || lastArmed != armed) {
             Log.i(TAG, (lastArmed == null ? "initial" : "edge") + " arm state: "
                     + (armed ? "ARMED" : "DISARMED") + String.format(" (flags=0x%08x)", flags));

@@ -69,6 +69,41 @@ the Android glue lives here:
 The link can fall back to the standard wfb-ng broadcast pipeline; the two modes
 are coordinated by `ApfpvLinkManager` / `LinkModeCoordinator`.
 
+## Ground-station features
+
+> **VTX prerequisite.** The ground-drawn OSD, the MSP/aalink overlays, the
+> raw / dual recording, **and audio playback** all rely on the air unit running
+> in **ground mode** — the VTX streaming *clean* video while forwarding MSP
+> (UDP 14550) and pushing aalink (UDP 14551). Set that up with the scripts in
+> [**apfpv-vtx**](https://github.com/GingerFluffyCat/apfpv-vtx)
+> (`vtx-osd-mode.sh ground` + the `aalink_udp` relay); it installs the
+> forward-capable msposd and can be reverted with `vtx-osd-mode.sh stock`. Without
+> ground mode the VTX burns its own OSD into the video and the raw/dual recording
+> isn't clean.
+
+- **Auto DVR + dual raw/OSD recording.** Recording starts automatically on FC
+  **arm** and stops on disarm (auto-DVR default on). Three record modes: Raw
+  (clean), OSD (overlay burned in), and **Raw+OSD** (default — writes *two*
+  files, an untouched raw clip and a parallel OSD-composited copy). The
+  composited OSD includes **all** on-screen layers — the legacy WFB OSD, the
+  MSP/Betaflight OSD, and the aalink status line — and stays live throughout the
+  recording. Works in VR mode too.
+- **Selectable OSD fonts.** A menu picks the Betaflight glyph atlas used for the
+  ground-side OSD; several HD atlases are bundled (`assets/fonts/`,
+  `BTFL_default` + `BTFL_{BLINDER,CLASH,CONTHRAX,EUROPA,NEXUS,SPHERE}_HD`). Any
+  atlas glyph size auto-scales, so a new font is just a PNG.
+- **Voice alerts (audio).** OpenTX/EdgeTX-style spoken alerts built from
+  concatenated clips (the **en_us-sara** pack in `assets/sounds/`): arm/disarm,
+  battery voltage/level, and link-quality warnings, driven by an edge-triggered
+  rule table (`assets/apfpv_sounds.conf`) that reads the arm bit and OSD-scraped
+  values. Toggle under **Voice alerts**; on by default. Plus the live **Opus
+  audio** stream from the camera (see below).
+- **aalink status line & MSP OSD over the dongle.** The aalink stats line
+  (LQ/MCS/bitrate/channel/txpower) arrives over **UDP 14551** from the VTX
+  `aalink_udp` relay, and MSP telemetry (arm state, Betaflight OSD) over **UDP
+  14550** — both pushed inbound, so they work on the dongle path where an
+  outbound HTTP poll can't.
+
 ## Compatibility
 
 - arm64-v8a, armeabi-v7a Android devices (including Meta Quest 2/3, non-VR mode)

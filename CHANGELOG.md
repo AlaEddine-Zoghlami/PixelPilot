@@ -2,6 +2,13 @@
 
 All notable changes to the APFPV fork of PixelPilot.
 
+## v0.4.12 — 2026-07-30
+
+### Fixed
+- **Battery voice sequence** — announces descending battery levels once at 80%, 60%, 40%, and
+  20%, then waits for the separate one-shot "low battery" warning. The state resets per flight,
+  ignores invalid voltage, and confirms transitions to reject temporary load sag.
+
 ## v0.4.2 — 2026-07-23
 
 ### Fixed

@@ -89,6 +89,18 @@ Java_com_openipc_videonative_GLFanoutManager_nativeRenderFrameEncodeOnly(JNIEnv*
     R(h)->renderFrameEncodeOnly(m);
 }
 
+// Display frame pacing: the vsync timebase for presentation timestamps. nativeSetVsyncNs is
+// called ~once per refresh from the Choreographer callback (cheap: one atomic store).
+JNIEXPORT void JNICALL
+Java_com_openipc_videonative_GLFanoutManager_nativeSetVsyncNs(JNIEnv*, jobject, jlong h, jlong frameTimeNs) {
+    if (h) R(h)->setVsyncNs((int64_t) frameTimeNs);
+}
+
+JNIEXPORT void JNICALL
+Java_com_openipc_videonative_GLFanoutManager_nativeSetRefreshNs(JNIEnv*, jobject, jlong h, jlong ns) {
+    if (h && ns > 0) R(h)->setRefreshNs((uint64_t) ns);
+}
+
 JNIEXPORT void JNICALL
 Java_com_openipc_videonative_GLFanoutManager_nativeRelease(JNIEnv*, jobject, jlong h) {
     if (h) delete R(h);
